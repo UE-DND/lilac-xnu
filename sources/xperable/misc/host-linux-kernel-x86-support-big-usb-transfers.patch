@@ -1,0 +1,50 @@
+add ARCH_FORCE_MAX_ORDER kconfig option to x86 arch
+
+this is cloned from arch/arm64/Kconfig, the default value is set to 14
+in order to allow big usb transfers, like 16MB or more
+
+usbcore.usbfs_memory_mb=0 kernel command line option is needed too
+in order to enable big usb transfers
+
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 05c82fd5d..a34c71d51 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -2077,6 +2077,37 @@ config ARCH_SUPPORTS_CRASH_DUMP
+ config ARCH_SUPPORTS_CRASH_HOTPLUG
+ 	def_bool y
+ 
++# include/linux/mmzone.h requires the following to be true:
++#
++#   MAX_ORDER + PAGE_SHIFT <= SECTION_SIZE_BITS
++#
++# so the maximum value of MAX_ORDER is SECTION_SIZE_BITS - PAGE_SHIFT:
++#
++#     | SECTION_SIZE_BITS |  PAGE_SHIFT  |  max MAX_ORDER  |  default MAX_ORDER |
++# ----+-------------------+--------------+-----------------+--------------------+
++# 4K  |       27          |      12      |       15        |         10         |
++# 16K |       27          |      14      |       13        |         11         |
++# 64K |       29          |      16      |       13        |         13         |
++config ARCH_FORCE_MAX_ORDER
++	int
++	default "13" if ARM64_64K_PAGES
++	default "11" if ARM64_16K_PAGES
++	default "14"
++	help
++	  The kernel page allocator limits the size of maximal physically
++	  contiguous allocations. The limit is called MAX_ORDER and it
++	  defines the maximal power of two of number of pages that can be
++	  allocated as a single contiguous block. This option allows
++	  overriding the default setting when ability to allocate very
++	  large blocks of physically contiguous memory is required.
++
++	  The maximal size of allocation cannot exceed the size of the
++	  section, so the value of MAX_ORDER should satisfy
++
++	    MAX_ORDER + PAGE_SHIFT <= SECTION_SIZE_BITS
++
++	  Don't change if unsure.
++
+ config PHYSICAL_START
+ 	hex "Physical address where the kernel is loaded" if (EXPERT || CRASH_DUMP)
+ 	default "0x1000000"

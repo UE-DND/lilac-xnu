@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.patch -text
+*.bin binary
+sources/** -text
+third_party/** -text

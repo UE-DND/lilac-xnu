@@ -1,0 +1,15 @@
+*.o
+xperable
+xperable.exe
+xperable.aarch64
+libusb-mingw/
+libusb-static/
+LinuxLoader-o77.pe
+LinuxLoader-p114.pe
+LinuxLoader-p118.pe
+LinuxLoader-q207.pe
+boot/
+47.1.A.2.281/
+47.2.A.11.228/
+52.0.A.8.50/
+52.1.A.3.49/
