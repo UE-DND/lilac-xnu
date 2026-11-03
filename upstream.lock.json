@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "import_policy": {
+    "history": "fixed source snapshots; no upstream Git history",
+    "excluded_from_all_projects": [".git", "nested submodule gitlinks", "build outputs", "SDKs", "local inputs"],
+    "excluded_from_hakios": ["prebuilt/"],
+    "excluded_from_pe_parse": ["tests/assets/corkami-poc-dataset"]
+  },
+  "source_links": {
+    "bootloader/ufs-read.c": "shared/ufs-read.c",
+    "bootloader/ufs-read.h": "shared/ufs-read.h",
+    "kernel/lilac-image.h": "shared/lilac-image.h",
+    "kernel/lilac-ufs-api.h": "shared/lilac-ufs-api.h",
+    "kernel/lilac-display-api.h": "shared/lilac-display-api.h",
+    "kernel/lilac-ufs.c": "sources/xnu/bsd/dev/lilac.ufs.c",
+    "kernel/lilac-image.c": "sources/xnu/bsd/dev/lilac.image.c",
+    "sources/xnu/bsd/dev/lilac.ufs-transport.c": "shared/ufs-read.c",
+    "sources/xnu/bsd/dev/ufs-read.h": "shared/ufs-read.h",
+    "sources/xnu/bsd/dev/lilac-image.h": "shared/lilac-image.h",
+    "sources/xnu/bsd/dev/lilac-ufs-api.h": "shared/lilac-ufs-api.h",
+    "sources/xnu/iokit/Kernel/lilac-display-api.h": "shared/lilac-display-api.h"
+  },
+  "projects": {
+    "xnu": {
+      "url": "https://github.com/apple-oss-distributions/xnu.git",
+      "commit": "c54f35ca767986246321eb901baf8f5ff7923f6a",
+      "path": "sources/xnu",
+      "tag": "xnu-8796.121.2",
+      "license_paths": [
+        "APPLE_LICENSE",
+        "bsd/miscfs/apfs/libdeflate/COPYING"
+      ],
+      "excluded": []
+    },
+    "hakios": {
+      "url": "https://github.com/oosexgang/hakios-xnu-kernel",
+      "commit": "a48d2b29dd58da5ef322052a7f4f73d7eb8eebc4",
+      "path": "sources/hakios",
+      "tag": null,
+      "license_paths": [
+        "LICENSE",
+        "LICENSE.APSL",
+        "NOTICE",
+        "THIRD_PARTY_LICENSES.md"
+      ],
+      "source_layout": {
+        "kernel_implementations": "sources/xnu",
+        "upstream_kernel_prefixes": ["xnu/files/", "drivers/"],
+        "driver_configuration": "sources/hakios/drivers"
+      },
+      "excluded": [
+        "xnu/files",
+        "xnu/apply.sh",
+        "xnu/export.sh",
+        "xnu/sync-drivers.sh",
+        "xnu/hakios.patch",
+        "tools/update-prebuilt.sh",
+        "prebuilt/SHA256SUMS",
+        "prebuilt/hakios-kernel",
+        "prebuilt/loader.efi",
+        "prebuilt/userland/HakiosAudio",
+        "prebuilt/userland/child",
+        "prebuilt/userland/cpu_test",
+        "prebuilt/userland/hello",
+        "prebuilt/userland/hello_dyn",
+        "prebuilt/userland/init",
+        "prebuilt/userland/libhakios.app.dylib",
+        "prebuilt/userland/libhakios.dylib",
+        "prebuilt/userland/libhakios.media.dylib",
+        "prebuilt/userland/libhakios.sb.dylib",
+        "prebuilt/userland/libhakios.tweaks.dylib",
+        "prebuilt/userland/mg_test",
+        "prebuilt/userland/net_test",
+        "prebuilt/userland/rwtouch",
+        "prebuilt/userland/sound_test",
+        "prebuilt/userland/stage0",
+        "prebuilt/userland/surf_test",
+        "prebuilt/userland/svc_test"
+      ]
+    },
+    "xperable": {
+      "url": "https://github.com/j4nn/xperable",
+      "commit": "0bf7060a966f91ed6251386bb6281648e416a03a",
+      "path": "sources/xperable",
+      "tag": "v1.1",
+      "license_paths": [
+        "LICENSE"
+      ],
+      "excluded": [
+        ".gitmodules"
+      ]
+    },
+    "pe-parse": {
+      "url": "https://github.com/trailofbits/pe-parse",
+      "commit": "31ac5966503689d5693cd9fb520bd525a8710e17",
+      "path": "third_party/pe-parse",
+      "tag": null,
+      "license_paths": [
+        "LICENSE"
+      ],
+      "excluded": [
+        ".gitmodules"
+      ]
+    },
+    "hfs": {
+      "url": "https://github.com/apple-oss-distributions/hfs.git",
+      "commit": "31d5ec238dfab485e78a9a30b8b92d13e8914f03",
+      "tag": "hfs-627.100.6",
+      "path": "sources/xnu/bsd/hfs",
+      "license_paths": [
+        "hfs.h"
+      ],
+      "imported_paths": [
+        "bsd/hfs",
+        "bsd/hfs_encodings"
+      ],
+      "via": "xnu"
+    }
+  },
+  "dependencies": {
+    "AvailabilityVersions": {
+      "kind": "git",
+      "url": "https://github.com/apple-oss-distributions/AvailabilityVersions.git",
+      "commit": "5d9baee345b3bc72b26c71adc65f94f2d5e9ced2"
+    },
+    "libdispatch": {
+      "kind": "git",
+      "url": "https://github.com/apple-oss-distributions/libdispatch.git",
+      "commit": "a641558f447659d90ad002ef0ee6f0212273fbfc"
+    },
+    "libpthread": {
+      "kind": "git",
+      "url": "https://github.com/apple-oss-distributions/libpthread.git",
+      "commit": "a6c70ca0e544347a0377babf748f831577ec24f9"
+    },
+    "mm_bootstrap_cmds": {
+      "kind": "git",
+      "url": "https://github.com/markmentovai/bootstrap_cmds",
+      "commit": "f337e600741638896fb6056ce87c6479f74b89a3"
+    },
+    "tcsh": {
+      "kind": "git",
+      "url": "https://github.com/tcsh-org/tcsh.git",
+      "commit": "b7db07931546178c4cb2542b5fc850c483628ed5"
+    },
+    "unifdef": {
+      "kind": "git",
+      "url": "https://github.com/fanf2/unifdef.git",
+      "commit": "08d12cd3059fe072929ea001ad9833f5487fd355"
+    },
+    "mesa": {
+      "kind": "archive",
+      "version": "25.0.7",
+      "url": "https://archive.mesa3d.org/mesa-25.0.7.tar.xz",
+      "sha256": "592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6",
+      "optional": true,
+      "python_lock": {
+        "path": "configs/mesa-python.lock.json",
+        "sha256": "a9faeb16b576d73aae44db10d9416bf3f05e0817ab68378786e74ebd391170da"
+      },
+      "patches": {
+        "sources/hakios/tools/mesa/air-frontend.patch": "c29e06eb539b713b8bc5340e37a49d3e39fb16426da79043ec2b49fd3953737a",
+        "sources/hakios/tools/mesa/air-ir3.patch": "8a1d466752e341f295d5a05e2e0356664489a8a3cbe174af054ed6500da0a69b",
+        "sources/hakios/tools/mesa/freedreno-darwin.patch": "2a9817e2e575a5f768cf778204f502106de11b8a88a5beb8c19fc4548c5c9c6a",
+        "sources/hakios/tools/mesa/ir3-round-default.patch": "2065de1cb4fc0fcc5f9a8fee214b6a5112ea6182f983f192e0c235980879bb8e",
+        "sources/hakios/tools/mesa/osmesa-es-profile.patch": "9ca1cbbd0becbc1bc57a5cd616d60b8a53e3e42f4208241b34bded686bcfb0bd"
+      }
+    }
+  }
+}

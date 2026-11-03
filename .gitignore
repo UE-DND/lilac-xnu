@@ -1,0 +1,16 @@
+# SDKs, firmware, extracted system files and build output.
+/local/
+/out/
+/configs/lilac/system-map.bin
+
+.DS_Store
+__pycache__/
+*.py[cod]
+*.o
+*.a
+*.so
+*.dylib
+*.orig
+*.rej
+*.swp
+*~

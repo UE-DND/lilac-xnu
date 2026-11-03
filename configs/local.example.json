@@ -1,0 +1,9 @@
+{
+  "ios": "local/ios/16.5-20F66",
+  "ios_sdk": "local/sdk/iPhoneOS16.5.sdk",
+  "macos_sdk": "local/sdk/MacOSX13.3.sdk",
+  "dtb": "local/devices/lilac/live.dtb",
+  "system_map": "local/devices/lilac/system-map.bin",
+  "gpu_firmware": "local/gpu-firmware",
+  "sony_firmware": "local/sony-firmware/firmware.tar"
+}
