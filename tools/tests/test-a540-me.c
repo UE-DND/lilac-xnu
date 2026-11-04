@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-a540-me.h"
+#include "../../kernel/lilac-a540-me.h"
 int main(void) {
     uint32_t words[16]={0}, before[16];
     struct lilac_a5xx_ring r={words,16,12};

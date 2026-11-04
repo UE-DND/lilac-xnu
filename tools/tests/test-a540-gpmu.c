@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../kernel/lilac-a540-gpmu.h"
+#include "../../kernel/lilac-a540-gpmu.h"
 static void expect_reject(uint8_t *fw,size_t len,uint32_t *out,size_t cap) {
     size_t done=123;uint32_t before=out[0];
     assert(!lilac_a540_gpmu_stream(fw,len,out,cap,&done));assert(done==123 && out[0]==before);

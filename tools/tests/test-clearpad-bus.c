@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-clearpad-bus.h"
+#include "../../kernel/lilac-clearpad-bus.h"
 struct fake { unsigned calls; int fail; };
 static int xfer(void *context,uint8_t addr,const uint8_t *w,size_t wn,uint8_t *r,size_t rn) {
     struct fake *f=context; f->calls++; assert(addr==0x2c);

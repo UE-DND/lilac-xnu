@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-clearpad-rmi.h"
+#include "../../kernel/lilac-clearpad-rmi.h"
 
 struct fixture { int corrupt, fail_at, calls, changing; uint16_t attention; uint8_t object[80]; };
 static int fake(void *arg, uint16_t address, uint8_t *buf, size_t n) {
@@ -31,6 +31,15 @@ static int fake(void *arg, uint16_t address, uint8_t *buf, size_t n) {
     return -1;
 }
 int main(void) {
+    assert(lilac_rmi_configured(0, 0x80, 0));
+    assert(lilac_rmi_configured(0x80, 0x80, 0));
+    assert(lilac_rmi_configured(4, 0x84, 1));
+    assert(!lilac_rmi_configured(0, 0x80, 0x81));
+    assert(!lilac_rmi_configured(0, 0x80, 0x40));
+    assert(!lilac_rmi_configured(0, 0x80, 6));
+    assert(!lilac_rmi_configured(1, 0x80, 0));
+    assert(!lilac_rmi_configured(1, 0x81, 0));
+    assert(!lilac_rmi_configured(0, 0x84, 0));
     struct fixture f={0}; struct lilac_rmi_device d={0}, original;
     struct lilac_f12_event e[10]; size_t n=77;
     assert(lilac_rmi_discover(fake,&f,&d));

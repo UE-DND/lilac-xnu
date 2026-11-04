@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-a5xx-pm4.h"
+#include "../../kernel/lilac-a5xx-pm4.h"
 static unsigned reference_parity(uint32_t x) { unsigned ones=0;while(x){ones+=x&1;x>>=1;}return !(ones&1); }
 int main(void) {
     uint32_t mem[16400],payload[16383];memset(payload,0x5a,sizeof(payload));

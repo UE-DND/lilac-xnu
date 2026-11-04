@@ -6,7 +6,7 @@ import struct
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--firmware-pages', type=Path, help='8KiB retired slot fixture; capture or explicitly labelled photo reconstruction')
 args = parser.parse_args()
@@ -37,7 +37,8 @@ enum { NORMAL, BAD_LUN, BAD_TM, BUSY, BAD_POINTER, BAD_LAYOUT, UNSUPPORTED,
        BAD_ENTRIES_CRC, BAD_BACKUP_ARRAY, BAD_REPEAT_ARRAY, BAD_PARTITION_RANGE,
        OVERLAP, DUP_GUID, PARTITION_UNSTABLE, FINAL_UNSTABLE, MAX_BATCH,
        OLD_PARTIAL_RESPONSE, CHANGED_LAYOUT, OLD_BAD_DMA, TOO_MANY_ENTRIES,
-       NO_PARTITIONS, ODD_ENTRIES, STUCK_COUNTER, LATE_TIMEOUT, LATE_MOVED_QUEUE };
+       NO_PARTITIONS, ODD_ENTRIES, STUCK_COUNTER, LATE_TIMEOUT, LATE_MOVED_QUEUE,
+       CORRUPT_UNTOUCHED_TR, DEADLINE_COMPLETION };
 static void putle32(uint8_t *p,uint32_t x) { for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(x>>(8*i)); }
 static void putle64(uint8_t *p,uint64_t x) { putle32(p,(uint32_t)x);putle32(p+4,(uint32_t)(x>>32)); }
 static void header(uint8_t *p,uint32_t own,uint32_t other,uint32_t first_entries,unsigned count,unsigned stride) {
@@ -124,6 +125,7 @@ void ur_set_reg(uint32_t offset,uint32_t value) {
     if (scenario==SHORT_RESPONSE) reply[1]=0x20;
     if (scenario==FATAL_STATUS) regs[IS/4]|=1u<<16;
     if (scenario==MOVED_QUEUE || (scenario==LATE_MOVED_QUEUE && calls==6)) regs[TRBA/4]+=4096;
+    if (scenario==CORRUPT_UNTOUCHED_TR) mem[1000]^=1;
 }
 uint32_t ur_load(uint64_t address) {
     assert(address>=BASE && address<BASE+8192 && address%4==0);
@@ -137,7 +139,13 @@ void ur_store(uint64_t address,uint32_t value) {
     if (scenario==FAILED_RESTORE && calls==expected_calls && address==BASE+4096) value^=1;
     mem[(address-BASE)/4]=value;
 }
-uint64_t ur_ticks(void) { if (scenario!=STUCK_COUNTER) ticks+=10000;return ticks; }
+uint64_t ur_ticks(void) {
+    if (scenario==DEADLINE_COMPLETION && regs[TRDB/4] && ticks) {
+        /* Complete between the busy-register read and deadline check. */
+        regs[TRDB/4]=0;ticks+=3000000;return ticks;
+    }
+    if (scenario!=STUCK_COUNTER) ticks+=10000;return ticks;
+}
 uint64_t ur_frequency(void) { return scenario==NO_COUNTER?0:1000000; }
 void ur_barrier(void) {}
 void lilac_ufs_read_progress(uint32_t s,uint32_t detail) { (void)s;(void)detail; }
@@ -212,6 +220,12 @@ int main(void) {
     assert(fast.error==UR_UNSTABLE && fast.restored && calls==10);
     setup(OVERLAP);lilac_ufs_read_probe_fast(&fast);
     assert(fast.error==UR_BAD_PARTITION && fast.restored && calls==17);
+    /* Polling at the deadline must not lose a completion that arrived after
+       its last busy read, and a still-busy request must still time out. */
+    setup(DEADLINE_COMPLETION);frequency=1000000;regs[TRDB/4]=1;
+    assert(wait_reg(TRDB,~0u,0,2000) && regs[TRDB/4]==0);
+    setup(TIMEOUT);frequency=1000000;regs[TRDB/4]=1;
+    assert(!wait_reg(TRDB,~0u,0,2000) && regs[TRDB/4]==1);
     /* Wire mutation tests apply at every submission. Completed old WRITE
        acceptance cannot turn WRITE, UNMAP or Query into a generated command. */
     uint8_t u[32]={1,0x40,0,0xc0};putbe32(u+12,4096);u[16]=0x28;u[24]=1;
@@ -249,6 +263,9 @@ int main(void) {
     setup(NORMAL);memset(range_data,0x5a,sizeof(range_data));
     lilac_ufs_read_range(&range_result,9999,0,2,range_data);
     assert(!range_result.error && range_result.completed==2 && range_result.restored && calls==2);
+    /* No DMA-page poison per block; only changed descriptor words and the
+       full TM page are restored. Unexpected TR changes must still fail. */
+    assert(ram_writes==2*(32+8+2+8)+8+32+1024);
     assert(range_data[510]==0x55 && !memcmp(range_data+4096,main_header,4096) && range_data[8192]==0x5a);
     assert(!memcmp(mem,original,sizeof(mem)));
     lilac_ufs_read_range(&range_result,9999,9999,1,range_data);
@@ -266,6 +283,8 @@ int main(void) {
     assert(range_result.error==UR_RESPONSE_FAILED && range_result.restored && range_data[0]==0x5a && !memcmp(mem,original,sizeof(mem)));
     setup(TIMEOUT);lilac_ufs_read_range(&range_result,9999,0,1,range_data);
     assert(range_result.error==UR_IO_TIMEOUT && !range_result.restored && regs[TRDB/4]==1);
+    setup(CORRUPT_UNTOUCHED_TR);lilac_ufs_read_range(&range_result,9999,0,1,range_data);
+    assert(range_result.error==UR_RESTORE_FAILED && !range_result.restored && regs[TRRUN/4]==0);
     setup(NORMAL);static struct ur_result limit;result=&limit;limit.submitted=UR_MAX_COMMANDS;
     assert(!transfer(0x25,0,8) && limit.error==UR_LIMIT && calls==0 && writes==0 && ram_writes==0);
     assert(crc32((const uint8_t *)"123456789",9,0)==0xcbf43926);

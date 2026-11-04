@@ -14,7 +14,7 @@ def run(group, build_path=None):
     output.mkdir(parents=True)
     results = []
     tests = []
-    for path in sorted((ROOT / 'tools').glob('test-*.py')):
+    for path in sorted((ROOT / 'tools/tests').glob('test-*.py')):
         name = path.stem[5:]
         if (name in INTEGRATION_PYTHON) != (group == 'integration'):
             continue
@@ -35,7 +35,7 @@ def run(group, build_path=None):
             if absent:
                 missing = 'missing GPU firmware: ' + ', '.join(absent)
         tests.append((name, command, missing))
-    for path in sorted((ROOT / 'tools').glob('test-*.c')):
+    for path in sorted((ROOT / 'tools/tests').glob('test-*.c')):
         name = path.stem[5:]
         if (name == 'a540-gpmu') != (group == 'integration'):
             continue

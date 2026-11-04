@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-qup-i2c-tags.h"
+#include "../../kernel/lilac-qup-i2c-tags.h"
 int main(void) {
     uint8_t out[9], original[9]; size_t tx=99,rx=99;
     const uint8_t expected[]={0x81,0x58,0x82,1,0x80,0x81,0x59,0x87,80};

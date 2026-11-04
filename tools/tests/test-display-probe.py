@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-source = (Path(__file__).resolve().parents[1] / 'userland/display-probe.c').read_text()
+source = (Path(__file__).resolve().parents[2] / 'userland/display-probe.c').read_text()
 function = source[source.index('static int wait_grid('):source.index('static int open_display(')]
 harness = r'''
 #include <stdint.h>

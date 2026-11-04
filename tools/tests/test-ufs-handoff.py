@@ -6,7 +6,7 @@ import struct
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--firmware-pages', type=Path, help='optional prior Fastboot 8KiB capture')
 args = parser.parse_args()

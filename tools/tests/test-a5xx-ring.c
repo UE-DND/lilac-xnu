@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-a5xx-ring.h"
+#include "../../kernel/lilac-a5xx-ring.h"
 int main(void) {
     uint32_t memory[8], before[8], data[]={0x11,0x22,0x33,0x44,0x55,0x66,0x77};
     for(size_t w=0;w<8;w++)for(size_t r=0;r<8;r++)for(size_t n=0;n<=7;n++) {

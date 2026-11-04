@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 source = (ROOT/'kernel/lilac-ufs.c').read_text()
 
 def function(name):
@@ -50,12 +50,13 @@ static bool ready,dead;
 static uint32_t block_size[130],bounce[LILAC_IO_BATCH*1024];
 static struct lilac_image_map *image_map;
 static bool image_ready;
-static uint64_t io_calls,io_blocks,io_errors;
+static uint64_t io_calls,io_blocks,io_errors,io_batches,io_ticks;
 #define LILAC_IMAGE_CACHE_SLOTS 256u
 static struct {uint64_t lba;bool valid;uint8_t data[4096];} image_cache[LILAC_IMAGE_CACHE_SLOTS];
 static uint64_t io_cache_hits;
 static int lilac_ufs_lock,held;
 static unsigned reads,fail_at;
+static uint64_t ur_ticks(void) {static uint64_t ticks;return ++ticks;}
 static void lck_mtx_lock(int *p) {(void)p;assert(!held);held=1;}
 static void lck_mtx_unlock(int *p) {(void)p;assert(held);held=0;}
 static void *kalloc_data(size_t n,int f) {(void)f;return malloc(n);}
@@ -91,7 +92,7 @@ tests = r'''
 static void setup(void) {
     memset(&info,0,sizeof(info));info.parts=1;info.last_lba=99;
     info.part[0].first=10;info.part[0].last=19;
-    ready=true;dead=false;image_ready=false;image_map=NULL;held=0;reads=fail_at=0;io_calls=io_blocks=io_errors=io_cache_hits=0;
+    ready=true;dead=false;image_ready=false;image_map=NULL;held=0;reads=fail_at=0;io_calls=io_blocks=io_errors=io_cache_hits=io_batches=io_ticks=0;
     memset(image_cache,0,sizeof(image_cache));
     block_size[0]=block_size[1]=4096;
 }
@@ -108,7 +109,7 @@ int main(void) {
     assert(disk_psize(1)==512 && disk_psize(2)==-1 && disk_ioctl(1,99,(caddr_t)&size,0,NULL)==ENOTTY);
     memset(b,0xa5,sizeof(b));assert(!read_bytes(1,4096-17,b,sizeof(b)));
     for (unsigned i=0;i<sizeof(b);i++) assert(b[i]==pattern(10*4096+4096-17+i));
-    assert(reads==2 && !held);
+    assert(reads==2 && io_batches==2 && io_ticks==2 && !held);
     unsigned before=reads;
     assert(read_bytes(2,0,b,1)==EINVAL && read_bytes(1,40960,b,1)==EINVAL &&
         read_bytes(1,UINT64_MAX,b,1)==EINVAL && read_bytes(1,0,b,UINT64_MAX)==EINVAL && reads==before);

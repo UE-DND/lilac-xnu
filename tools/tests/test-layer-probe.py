@@ -5,7 +5,7 @@ import json
 import subprocess
 import tempfile
 
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).resolve().parents[2]
 harness = '''
 #define LILAC_UIKIT 0
 #define main lilac_device_main

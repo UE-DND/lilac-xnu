@@ -5,7 +5,10 @@ import json
 import subprocess
 import tempfile
 
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lilaclib.paths import local_path
 font = local_path('ios') / 'rootfs/System/Library/Fonts/Core/CourierNew.ttf'
 source = root / 'userland/graphics-probe.c'

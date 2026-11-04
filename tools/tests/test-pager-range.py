@@ -5,7 +5,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lilaclib.paths import XNU
 DEFAULT_SOURCE = XNU / 'osfmk/vm/vm_object.c'
 

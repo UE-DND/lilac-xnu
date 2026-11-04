@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import zlib
 
-root=Path(__file__).resolve().parents[1]
+root=Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory(prefix='lilac-raw-map-') as tmp:
     p=Path(tmp);image=bytearray(3*4096);image[32:36]=b'NXSB';image[-1]=42
     (p/'image').write_bytes(image);sha=hashlib.sha256(image).hexdigest()

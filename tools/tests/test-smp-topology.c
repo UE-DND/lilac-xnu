@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 #include <assert.h>
 #include <stdio.h>
-#include "../bootloader/smp-topology.h"
+#include "../../bootloader/smp-topology.h"
 struct fixture { int64_t states[8];unsigned calls; };
 static int64_t affinity(uint32_t id,void *arg) {
     struct fixture *f=arg;unsigned i=(id>>8)*4+(id&255);

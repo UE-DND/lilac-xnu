@@ -4,7 +4,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lilaclib.paths import XNU
 source = XNU / 'osfmk/arm64/loader_return.c'
 text = source.read_text()

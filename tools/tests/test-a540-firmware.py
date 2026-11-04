@@ -2,6 +2,9 @@
 """Check A540 firmware verifier against the actual locally acquired files and corruptions."""
 from pathlib import Path
 import tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import a540_firmware
 
 from lilaclib.paths import local_path

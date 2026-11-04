@@ -6,7 +6,10 @@ import re
 import subprocess
 import tempfile
 
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lilaclib.paths import XNU
 KERNEL=XNU/'iokit/Kernel'
 wire=(ROOT/'kernel/lilac-display-api.h').read_text()

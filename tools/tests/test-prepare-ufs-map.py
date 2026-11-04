@@ -6,7 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 import tempfile
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory(prefix='prepare-map-') as tmp:
     d=Path(tmp);image=d/'system.apfs';b=bytearray(16384);b[32:36]=b'NXSB';image.write_bytes(b)
     layout={'gpt_crc':123,'userdata':{'first':100,'last':199}}

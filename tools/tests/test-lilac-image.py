@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 program=r'''
 #include <assert.h>
 #include <stdint.h>

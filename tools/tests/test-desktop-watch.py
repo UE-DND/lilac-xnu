@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).resolve().parents[2]
 source = (root / 'userland/desktop-watch.c').read_text()
 harness = r'''
 #ifdef __linux__

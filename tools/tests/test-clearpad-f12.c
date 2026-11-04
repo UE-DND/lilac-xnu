@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "../kernel/lilac-clearpad-f12.h"
+#include "../../kernel/lilac-clearpad-f12.h"
 int main(void) {
     uint8_t presence[2] = {0x8a, 0x80}, offsets[16];
     assert(lilac_f12_offsets(presence,2,offsets,16));
