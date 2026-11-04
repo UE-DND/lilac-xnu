@@ -11,6 +11,7 @@ from .records import digest, fingerprint, inventory, save_json
 
 OBJECT_FLAGS = {
     'lilac.touch.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
+    'lilac.buttons.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'lilac.gpu-snapshot.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'lilac.rpm.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'lilac.a540.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',

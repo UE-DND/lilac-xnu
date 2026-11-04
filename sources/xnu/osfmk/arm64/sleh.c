@@ -1527,6 +1527,8 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
 #if defined(GENERIC_GIC_V3_IRQ)
+    extern bool lilac_buttons_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
+    if (lilac_buttons_abort(state, esr, fault_addr)) return;
     extern bool lilac_touch_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
     if (lilac_touch_abort(state, esr, fault_addr)) return;
     extern bool lilac_gpu_abort(arm_saved_state_t *, uint32_t, vm_offset_t);

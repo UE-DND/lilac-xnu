@@ -118,6 +118,7 @@ bsd/dev/lilac.gpu-snapshot.c             standard
 bsd/dev/lilac.rpm.c                      standard
 bsd/dev/hakios.input.c                   standard
 bsd/dev/lilac.touch.c                    standard
+bsd/dev/lilac.buttons.c                  standard
 bsd/dev/hakios.net.c                     standard
 bsd/dev/hakios.image.c                   standard
 bsd/dev/hakios.sparse.c                  standard

@@ -38,18 +38,25 @@ static int sysctlbyname(const char *name, void *old, size_t *length, const void 
 
 int main(void)
 {
-    assert(lilac_touch_bridge_configure());
-    assert(writes == 1 && reads == 2);
-    assert(!strcmp(stored, "/lilac-probe/lib/liblilac.touch.dylib backboardd"));
-    assert(lilac_touch_bridge_configure());
-    strcpy(stored, "/other/library other_program");
-    writes = 0;
-    assert(!lilac_touch_bridge_configure() && !writes);
-    for (fault = 1; fault <= 8; fault++) {
+    for (int bringup = 0; bringup <= 1; bringup++) {
+        fault = 0;
         reads = writes = 0;
         stored[0] = 0;
-        assert(!lilac_touch_bridge_configure());
-        if (fault < 5 || fault == 8) assert(!writes);
+        assert(lilac_touch_bridge_configure(bringup));
+        assert(writes == 1 && reads == 2);
+        assert(!strcmp(stored, bringup ? "/lilac-probe/lib/liblilac.touch.dylib backboardd SpringBoard" :
+            "/lilac-probe/lib/liblilac.touch.dylib backboardd"));
+        assert(lilac_touch_bridge_configure(bringup));
+        assert(!lilac_touch_bridge_configure(!bringup));
+        strcpy(stored, "/other/library other_program");
+        writes = 0;
+        assert(!lilac_touch_bridge_configure(bringup) && !writes);
+        for (fault = 1; fault <= 8; fault++) {
+            reads = writes = 0;
+            stored[0] = 0;
+            assert(!lilac_touch_bridge_configure(bringup));
+            if (fault < 5 || fault == 8) assert(!writes);
+        }
     }
     puts("PASS: touch bridge library, exact target, conflict refusal, sysctl errors and readback");
     return 0;

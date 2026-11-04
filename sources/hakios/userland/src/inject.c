@@ -33,6 +33,9 @@
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#ifdef LILAC_GPU_INPUT
+#include <mach-o/dyld.h>
+#endif
 #include <notify.h>
 #include <objc/runtime.h>
 #include <pthread.h>
@@ -47,6 +50,9 @@
 #include <unistd.h>
 
 #include "hakios.input.h"
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+#include "lilac-home-gesture.h"
+#endif
 
 #ifndef LILAC_INPUT_ONLY
 #include "hakios.gl.h"
@@ -275,6 +281,7 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 	 * function -- strdup of a null name, say -- and the frame that matters is two or three up.
 	 */
 	char frames[8 * 20 + 1] = "";
+#ifndef LILAC_GPU_INPUT
 	size_t used = 0;
 	uintptr_t fp = context != NULL && context->uc_mcontext != NULL ? (uintptr_t)context->uc_mcontext->__ss.__fp : 0;
 
@@ -287,8 +294,12 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 		used += (size_t)snprintf(frames + used, sizeof(frames) - used, " %#lx", ret - slide);
 		fp = next > fp ? next : 0;      /* the chain only ever goes up the stack */
 	}
+#endif
 	say("hakios: signal %d at %p, pc %#lx, lr %#lx, called from%s (unslid)\n", signal_number,
 	    info != NULL ? info->si_addr : NULL, pc - slide, lr - slide, frames);
+#ifdef LILAC_GPU_INPUT
+	say("lilac fault: raw pc=%#lx lr=%#lx cache slide=%#lx\n", pc, lr, slide);
+#endif
 	signal(signal_number, SIG_DFL);
 	raise(signal_number);
 }
@@ -905,8 +916,17 @@ send_button(IOHIDServiceClientRef buttons, const struct hakios_touch *t)
 		publish_lock_button(t->type == HAKIOS_BUTTON_DOWN);
 	}
 	event = IOHIDEventCreateKeyboardEvent(NULL, t->time, HID_PAGE_CONSUMER, usage, t->type == HAKIOS_BUTTON_DOWN, 0);
+	if (event == NULL) {
+		say("hakios: input: cannot allocate button event %u\n", t->finger);
+		return;
+	}
 	IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+	Boolean accepted = IOHIDVirtualServiceClientDispatchEvent(buttons, event);
+	say("lilac input: button=%u down=%u accepted=%u\n", t->finger, t->type == HAKIOS_BUTTON_DOWN, accepted);
+#else
 	IOHIDVirtualServiceClientDispatchEvent(buttons, event);
+#endif
 	CFRelease(event);
 }
 
@@ -933,6 +953,9 @@ input_thread(__unused void *arg)
 	struct hakios_touch t;
 	unsigned count = 0, waking = 0;         /* waking: the fingers whose touch went into waking the display */
 	int device;
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+	struct lilac_home_gesture home = {0};
+#endif
 
 	pthread_setname_np("redwood input");
 	{
@@ -971,9 +994,16 @@ input_thread(__unused void *arg)
 	if (screen == NULL) {
 		return NULL;
 	}
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+	if (buttons != NULL) say("lilac input: three-finger tap sends Home after all fingers lift\n");
+#endif
 
 	while (read(device, &t, sizeof(t)) == (ssize_t)sizeof(t)) {
 		uint64_t read_at = mach_absolute_time();
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+		bool home_tapped = buttons != NULL &&
+		    lilac_home_gesture_update(&home, &t, micros(t.time), touch_mode, waking != 0);
+#endif
 
 		if (count++ < 4) {
 			say("hakios: input: sample type %u finger %u at %u %u\n", t.type, t.finger, t.x, t.y);
@@ -1004,6 +1034,18 @@ input_thread(__unused void *arg)
 				    micros(mach_absolute_time()));
 			}
 		}
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+		if (home_tapped) {
+			struct hakios_touch press = { .time = mach_absolute_time(), .type = HAKIOS_BUTTON_DOWN,
+			    .finger = HAKIOS_BUTTON_HOME };
+			say("lilac input: three-finger Home tap mode=%x\n", touch_mode);
+			send_button(buttons, &press);
+			usleep(80000);
+			press.time = mach_absolute_time();
+			press.type = HAKIOS_BUTTON_UP;
+			send_button(buttons, &press);
+		}
+#endif
 	}
 	say("hakios: input: %s: %s\n", HAKIOS_TOUCH_DEVICE, strerror(errno));
 	return NULL;
@@ -1104,6 +1146,20 @@ opengl_es(void)
 }
 
 #ifdef LILAC_GPU_INPUT
+/* Capture non-cache image placement outside the signal handler. Subtracting
+ * the cache slide is only meaningful for PCs inside the shared cache. */
+static void lilac_image_loaded(const struct mach_header *header, intptr_t image_slide)
+{
+	Dl_info info;
+	uintptr_t address = (uintptr_t)header;
+	size_t length = 0;
+	uintptr_t cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
+	if (cache && address >= cache && address - cache < length) return;
+	if (dladdr(header, &info))
+		say("lilac image: base=%#lx slide=%#lx path=%s\n", address,
+		    (unsigned long)image_slide, info.dli_fname ? info.dli_fname : "unknown");
+}
+
 /* Lilac keeps its input bridge and only opts in to GL after the kernel has
  * published a usable GPU service. Avoid unrelated redwood-specific patches. */
 __attribute__((constructor))
@@ -1118,6 +1174,11 @@ static void lilac_gpu_input_init(void)
 	const void *cache = _dyld_get_shared_cache_range(&length);
 	if (cache != NULL) {
 		slide = (uintptr_t)cache - CACHE_BASE;
+		/* Preserve PC/LR when the display process fails during bring-up. */
+		if (lilac_input_console >= 0) {
+			_dyld_register_func_for_add_image(lilac_image_loaded);
+			watch_for_faults();
+		}
 		opengl_es();
 	} else {
 		say("lilac: shared cache unavailable; keeping software renderer\n");

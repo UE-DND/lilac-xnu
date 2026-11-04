@@ -226,6 +226,7 @@ hakios_input_init(void)
 	}
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
 	lilac_touch_init();
+	lilac_buttons_init();
 	lilac_gpu_snapshot_init();
 	hakios_cpufreq_init();
 	hakios_virtio_input_init();

@@ -21,6 +21,30 @@ def validate_dtb(blob, gpu_cx=False):
     return nodes
 
 
+def validate_buttons(nodes):
+    base = '/soc/qcom,spmi@800f000'
+    pm = base + '/qcom,pm8998@0'
+    gpio = nodes.get(pm + '/gpios', {})
+    phandle = gpio.get('phandle', b'')
+    cells = lambda *v: struct.pack('>' + 'I' * len(v), *v)
+    expected = {
+        (base, 'reg'): cells(0x800f000, 0x1000, 0x8400000, 0x1000000, 0x9400000, 0x1000000, 0xa400000, 0x220000, 0x800a000, 0x3000),
+        (base, 'qcom,ee'): cells(0),
+        (pm, 'reg'): cells(0, 0),
+        (pm + '/qcom,power-on@800', 'reg'): cells(0x800, 0x100),
+        (pm + '/qcom,power-on@800/qcom,pon_1', 'qcom,pon-type'): cells(0),
+        (pm + '/qcom,power-on@800/qcom,pon_1', 'linux,code'): cells(116),
+        (pm + '/gpios/gpio@c500', 'reg'): cells(0xc500, 0x100),
+        (pm + '/gpios/gpio@c600', 'reg'): cells(0xc600, 0x100),
+        ('/soc/gpio_keys/vol_up', 'gpios'): phandle + cells(6, 1),
+        ('/soc/gpio_keys/vol_dn', 'gpios'): phandle + cells(5, 1),
+    }
+    if len(phandle) != 4 or any(nodes.get(path, {}).get(key) != value or
+        nodes.get(path, {}).get('status', b'okay\0') not in (b'ok\0', b'okay\0')
+        for (path, key), value in expected.items()):
+        raise ValueError('buttons require the verified PM8998 PON and GPIO key mapping')
+
+
 def validate_gpu_cx(nodes):
     gpu = nodes.get('/soc/qcom,kgsl-3d0@5000000', {})
     cx = nodes.get('/soc/qcom,gdsc@5066004', {})
