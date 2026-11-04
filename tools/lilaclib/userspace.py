@@ -59,8 +59,8 @@ def main():
                         help='experimental A/B: seed the upstream migration version preference on disposable RAM /var; skips stock migration')
     parser.add_argument('--touchscreen', action='store_true', help='experimental S3330 QUP acquisition and backboardd HID bridge; requires desktop attempt')
     parser.add_argument('--buttons', action='store_true', help='experimental PM8998 volume and power buttons; requires touchscreen bridge')
-    parser.add_argument('--display-mode', choices=('scaled2', 'iphone', 'native'), default='scaled2',
-                        help='desktop rendering: 750x1624 (default), 1125x2436, or experimental 720x1280')
+    parser.add_argument('--display-mode', choices=('scaled2', 'iphone'), default='scaled2',
+                        help='desktop rendering: 750x1624 (default) or 1125x2436')
     parser.add_argument('--usb-debug', action='store_true', help='export logs after kernel return; retain touch bridge diagnostics')
     parser.add_argument('--return-after', type=int, default=0, help='return to BootShim after this many seconds of kernel runtime')
     parser.add_argument('--gpu-runtime-pm',action=argparse.BooleanOptionalAction,default=None,help='A540 idle collapse/resume; enabled by default for the GPU desktop')
@@ -446,7 +446,6 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
         extra_boot_args += ' lilac_buttons=1'
     if args.desktop_attempt:
         if args.display_mode == 'scaled2': extra_boot_args += ' fbscale=2'
-        elif args.display_mode == 'native': extra_boot_args += ' fbwidth=720 fbheight=1280'
     if args.gpu_mesa_dir:
         extra_boot_args += ' lilac_gpu_snapshot=1 lilac_gpu_cx=1 lilac_a540=7 gpu_cached=1'
     if args.gpu_runtime_pm: extra_boot_args += ' lilac_gpu_pm=1'

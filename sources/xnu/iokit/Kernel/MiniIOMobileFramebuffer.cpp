@@ -98,14 +98,11 @@ static uint8_t  gFBCalls[128];          /* how many calls of each selector were 
  * MobileGestalt reports an unknown screen class and the user interface has no layout for it.
  * So the display is always the iPhone's, and a swap scales the picture to the panel that is
  * really there (in QEMU the loader makes the panel exactly this size and nothing is scaled).
- * Boot-args fbwidth= and fbheight= change the size reported.
  */
 #define kFBDefaultWidth         1125
 #define kFBDefaultHeight        2436
 #define kFBDotsPerInch          458
 
-static TUNABLE(uint32_t, gFBWidth, "fbwidth", kFBDefaultWidth);
-static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
 /*
  * Boot-arg fbscale=2: the same 375 x 812 points drawn at two pixels a point instead of three.
  * Everything that is drawn is drawn by the processor, and this is 2.25 times fewer pixels to
@@ -537,8 +534,8 @@ IOMobileFramebuffer::start(IOService * provider)
 	fPanelWidth = vinfo.v_width;
 	fPanelHeight = vinfo.v_height;
 	fRowBytes = vinfo.v_rowbytes;
-	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
-	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
+	fWidth = kFBDefaultWidth;
+	fHeight = kFBDefaultHeight;
 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
 		static const char * const places[][2] = { { "/chosen", "display-scale" }, { "/product", "artwork-scale-factor" } };
 		uint32_t scale = gFBScale;

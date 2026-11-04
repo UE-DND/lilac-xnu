@@ -407,17 +407,11 @@ CONFIG_GPU=y
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_FB_THREADS is not set
 
-# read by MiniIOMobileFramebuffer.cpp (kernel)
-# CONFIG_FBHEIGHT is not set
-
 # the same 375 x 812 points drawn at two pixels a point instead of three
 # CONFIG_FBSCALE is not set
 
 # log the first N calls of every selector (default 3)
 # CONFIG_FBTRACE is not set
-
-# read by MiniIOMobileFramebuffer.cpp (kernel)
-# CONFIG_FBWIDTH is not set
 
 # the surface's memory, as before
 # CONFIG_GLBLIT is not set

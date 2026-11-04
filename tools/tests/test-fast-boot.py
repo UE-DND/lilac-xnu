@@ -23,10 +23,10 @@ shim = json.loads((out/'image/manifest.json').read_text())
 image = out/'image/xnu-boot.img'
 assert manifest['fast_boot'] and manifest['mobile_runtime'] and manifest['desktop_attempt']
 assert not manifest['mesa_library'] and shim['quiet_boot']
+assert manifest['display_mode'] in ('scaled2', 'iphone')
 expected_args = ['lilac_ufs=1','lilac_quiet=1','lilac_ufs_fast=1'] + (['lilac_touch=1'] if manifest.get('touchscreen') else [])
 if manifest.get('buttons'): expected_args += ['lilac_buttons=1']
 if manifest.get('display_mode') == 'scaled2': expected_args += ['fbscale=2']
-if manifest.get('display_mode') == 'native': expected_args += ['fbwidth=720', 'fbheight=1280']
 if manifest.get('gpu_mesa_dir'):
     expected_args += ['lilac_gpu_snapshot=1', 'lilac_gpu_cx=1', 'lilac_a540=7', 'gpu_cached=1']
 if manifest.get('gpu_runtime_pm'): expected_args += ['lilac_gpu_pm=1']

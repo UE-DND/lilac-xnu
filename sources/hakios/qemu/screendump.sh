@@ -13,7 +13,7 @@ s.sendall(f'screendump {ppm}\n'.encode()); time.sleep(1.5)
 d = open(ppm, 'rb').read(); os.unlink(ppm)
 magic, size, maxval, pix = d.split(b'\n', 3)
 w, h = map(int, size.split())
-# the kernel uses the top left 1125x2436 of a bigger mode as the phone's screen (boot-args fbwidth/fbheight)
+# Crop the larger QEMU mode to the iPhone-sized 1125x2436 canvas.
 cw, ch = (min(w, 1125), min(h, 2436)) if os.environ.get('FULL') != '1' else (w, h)
 # QEMU pads every row of the PPM to a multiple of 4 bytes (wrong for the format, but that is what it writes)
 stride = len(pix) // h

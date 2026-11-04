@@ -34,10 +34,8 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `fb_pri` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_PRI` |  |
 | `fb_queue` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_QUEUE` |  |
 | `fb_threads` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_THREADS` |  |
-| `fbheight` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBHEIGHT` |  |
 | `fbscale` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE` |  |
 | `fbtrace` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBTRACE` |  |
-| `fbwidth` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBWIDTH` |  |
 | `glblit` | U | `eagl.c` | `CONFIG_GLBLIT` |  |
 | `glcensus` | U | `eagl.c` | `CONFIG_GLCENSUS` |  |
 | `glcopy` | U | `eagl.c` | `CONFIG_GLCOPY` |  |

@@ -25,6 +25,9 @@ class UserspaceOptionsTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.reject(['--return-after', value], '--return-after must be between 0 and 3600')
 
+    def test_removed_native_display_mode_is_rejected(self):
+        self.reject(['--display-mode', 'native'], "invalid choice: 'native'")
+
     def test_debug_smp_reaches_other_option_validation(self):
         self.reject(['--usb-debug', '--smp', '--touchscreen'], '--touchscreen requires --desktop-attempt')
 

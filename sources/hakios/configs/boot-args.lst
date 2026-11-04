@@ -96,10 +96,8 @@ fb_measure	k
 fb_pri	k
 fb_queue	k
 fb_threads	k
-fbheight	k
 fbscale	k
 fbtrace	k
-fbwidth	k
 gamut	l
 gl	u
 glblit	u

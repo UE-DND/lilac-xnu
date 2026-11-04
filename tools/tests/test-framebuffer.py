@@ -18,6 +18,8 @@ assert int(re.search(r'LILAC_DISPLAY_STATUS_COUNT\s+(\d+)',wire)[1]) <= int(re.s
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source',type=Path,default=KERNEL/'MiniIOMobileFramebuffer.cpp')
 text=parser.parse_args().source.read_text()
+geometry=text[text.index('\tfWidth =', text.index('fPanelWidth = vinfo.v_width;')):text.index('\tfColumn = IONewZero')]
+geometry_constants='\n'.join(re.findall(r'^#define kFB(?:DefaultWidth|DefaultHeight|PointsWide|PointsHigh|DefaultScale)\s+\d+',text,re.M))
 helpers=text[text.index('static inline uint32_t\nblend('):text.index('void\nIOMobileFramebuffer::drawRows(')]
 draw=text[text.index('void\nIOMobileFramebuffer::drawRows('):text.index('/* A helper of the scaling')]
 prefix=r'''
@@ -34,15 +36,24 @@ struct {uint32_t v_depth;} vinfo;
 struct RowJob;
 class IOMobileFramebuffer {
 public:
- uint32_t fPanelHeight,fPanelWidth,fRowBytes;
+ uint32_t fPanelHeight,fPanelWidth,fRowBytes,fWidth,fHeight;
  uint8_t *fBase;
  uint32_t *fColumn;uint16_t *fColumnWeight;
  bool fDiff;
  uint64_t fDiffPixels=0;
  uint32_t fDiffLeft=~0u,fDiffRight=0,fDiffTop=~0u,fDiffBottom=0;
  void drawRows(const RowJob *,int32_t,int32_t,uint32_t *);
+ void configureDisplay();
 };
+struct IORegistryEntry {
+ static IORegistryEntry *fromPath(const char *,const char *) {return nullptr;}
+ void setProperty(const char *,const void *,size_t) {}
+ void release() {}
+};
+static const char *gIODTPlane="IODeviceTree";
+static uint32_t gFBScale;
 '''
+prefix+=geometry_constants+'\nvoid IOMobileFramebuffer::configureDisplay() {\n'+geometry+'\n}\n'
 tests=r'''
 static uint32_t mix(uint32_t a,uint32_t b,unsigned w) {
  uint32_t out=0;for(unsigned c=0;c<4;c++)out|=((((a>>(c*8))&255)*(256-w)+((b>>(c*8))&255)*w)/256)<<(c*8);
@@ -101,11 +112,18 @@ static void check(unsigned depth,bool filter,bool unscaled,bool clip,unsigned pa
  for(unsigned i=0;i<guard;i++)assert(storage[i]==0xa5 && storage[storage.size()-1-i]==0xa5);
 }
 int main() {
+ for(unsigned panelWidth:{720,1080,1125}) {
+  IOMobileFramebuffer fb;fb.fPanelWidth=panelWidth;fb.fPanelHeight=1280;
+  for(unsigned scale:{0,3}) {
+   gFBScale=scale;fb.configureDisplay();assert(fb.fWidth==1125 && fb.fHeight==2436);
+  }
+  gFBScale=2;fb.configureDisplay();assert(fb.fWidth==750 && fb.fHeight==1624);
+ }
  for(unsigned depth:{24,32}) for(unsigned padding:{0,11}) {
   check(depth,false,true,false,padding);check(depth,false,false,false,padding);check(depth,true,false,false,padding);
   check(depth,false,false,true,padding);check(depth,true,false,true,padding);
  }
- puts("PASS: production framebuffer rows; 24/32bpp, scaling/filtering/clipping, RGB, alpha-only diff, odd stride, clear and guard bytes");
+ puts("PASS: iPhone canvas independent of panel size; production framebuffer rows; 24/32bpp, scaling/filtering/clipping, RGB, alpha-only diff, odd stride, clear and guard bytes");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='lilac-framebuffer-') as directory:
