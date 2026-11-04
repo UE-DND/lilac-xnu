@@ -21,19 +21,21 @@ iOS 16.5 包含完整的原始 arm64 Shared Cache。构建流程直接保留完�
 
 ## 构建系统镜像
 
-在完成内核与用户空间工具编译后，执行系统镜像构建：
+准备好 SDK 与 iOS 系统材料后，执行系统镜像构建：
 
 ```sh
-# 1. 编译 XNU 内核
+# 1. 编译 XNU 内核，并自动准备工具链依赖
 ./lilac build kernel
 
-# 2. 编译用户空间诊断与引导工具
-./lilac build userspace
-
-# 3. 打包生成 APFS 系统磁盘镜像
+# 2. 打包生成 APFS 系统磁盘镜像
 ./lilac build system
+
+# 3. 按需编译用户空间 RAM 启动镜像
+./lilac build userspace
 ```
 
-`build system` 会在输出目录中生成完整的 APFS 格式磁盘镜像，并自动校验 Shared Cache 及系统二进制的完整性。
+`build system` 会独立编译测试程序 `hello_dyn`，在输出目录中生成完整的 APFS 格式磁盘镜像，并自动校验 Shared Cache 及系统二进制的完整性。它不依赖 `userspace` 的中间产物；也可通过 `--probe-binary PATH` 使用已有程序。如果只构建系统镜像，可用 `./lilac deps build` 准备工具链，无需编译内核。
+
+`build userspace` 会自动调用 RAM 镜像打包流程，无需预先构建基础 RAM 镜像。单独调试底层引导时使用 `./lilac debug ramboot`，硬件探测使用 `./lilac debug hardware`。
 
 由于 Sony Fastboot 协议对单次 RAM 镜像传输大小有限制，且 XNU 内存管理窗口配置为 1.375 GiB，容量庞大的 iOS 系统镜像无法整体放入 RAMDisk 启动，必须将其部署至 UFS 存储并通过物理扇区映射表按需分页加载，具体部署细节见 [UFS 系统镜像映射](UFS-SYSTEM.md)。

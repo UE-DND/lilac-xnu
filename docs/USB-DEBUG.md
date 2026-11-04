@@ -30,7 +30,7 @@ RAM USB 调试机制属于 BootShim 阶段内置的轻量回传与控制协议�
 ### 1. 独立 USB 通道自检
 
 ```sh
-./lilac build ramboot --kernel out/latest/kernel/hakios-kernel --usb-self-test
+./lilac debug ramboot --kernel out/latest/kernel/hakios-kernel --usb-self-test
 ./lilac device run --build out/latest/ramboot \
   --fastboot /path/to/fastboot \
   --serial <设备序列号> --timeout 120 --reboot-bootloader

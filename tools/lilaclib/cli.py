@@ -10,6 +10,9 @@ import sys
 from .paths import ROOT, OUT, XNU, HAKIOS, PEPARSE, DEPS, load_lock, local_path, environment, require
 from .records import source_state, digest, fingerprint, provenance, run_directory, publish, save_json, workspace_lock
 
+BUILD_TARGETS = ('kernel', 'userspace', 'system', 'xperable', 'mesa')
+DEBUG_TARGETS = ('ramboot', 'hardware')
+
 
 def sources_check():
     errors = []
@@ -62,22 +65,23 @@ def doctor(target='host'):
         'host': [name for name in ('git', 'python3', 'clang', 'clang++') if not tools[name]],
         'kernel': [name for name in ('ios_sdk', 'macos_sdk') if not inputs[name]['exists']],
         'ramboot': [name for name in ('dtb', 'llvm') if not inputs[name]['exists']],
+        'hardware': [name for name in ('ios_sdk', 'dtb', 'llvm') if not inputs[name]['exists']],
         'userspace': [name for name in ('ios', 'ios_sdk', 'dtb', 'llvm') if not inputs[name]['exists']],
-        'system': [] if inputs['ios']['exists'] else ['ios'],
+        'system': [name for name in ('ios', 'ios_sdk') if not inputs[name]['exists']],
         'xperable': [name for name in ('cmake', 'pkg-config') if not tools[name]],
         'mesa': [name for name in ('ios_sdk', 'llvm') if not inputs[name]['exists']],
     }
-    for name in ('kernel', 'userspace', 'system', 'mesa'):
+    for name in ('kernel', 'userspace', 'system', 'mesa', 'hardware'):
         if not (DEPS / 'manifest.json').is_file():
-            prerequisites[name].append('prepared dependencies: ./lilac deps fetch && ./lilac deps build')
-    for name in ('ramboot', 'userspace'):
+            prerequisites[name].append('prepared dependencies: ./lilac deps fetch, then ./lilac build kernel (or ./lilac deps build for tools only)')
+    for name in ('ramboot', 'userspace', 'hardware'):
         if not (OUT / 'latest/kernel/hakios-kernel').is_file():
             prerequisites[name].append('kernel: ./lilac build kernel (or --kernel PATH)')
         for tool in ('clang', 'ld.lld', 'llvm-objcopy', 'llvm-nm'):
             if not (local_path('llvm') / tool).is_file():
                 prerequisites[name].append('LLVM ' + tool)
     if tools['pkg-config']:
-        for package, targets in (('libusb-1.0', ('xperable',)), ('openssl', ('kernel', 'userspace', 'system'))):
+        for package, targets in (('libusb-1.0', ('xperable',)), ('openssl', ('kernel', 'userspace', 'system', 'hardware'))):
             if subprocess.run(['pkg-config', '--exists', package]).returncode:
                 for name in targets:
                     prerequisites[name].append(package)
@@ -139,7 +143,8 @@ def build(target, arguments, output=None, jobs=8):
         if target == 'kernel' and (DEPS / 'setup.log').is_file():
             shutil.copy2(DEPS / 'setup.log', output / 'dependencies.log')
         save_json(output / 'failure.json', {'status': 'failed', 'error': str(error),
-                  'command': ['./lilac', 'build', target, '--output', str(output), '-j', str(jobs), *arguments]})
+                  'command': ['./lilac', 'debug' if target in DEBUG_TARGETS else 'build', target,
+                              '--output', str(output), '-j', str(jobs), *arguments]})
         print(f'Failure report: {output}', file=sys.stderr)
         raise
     manifest_path = output / 'manifest.json'
@@ -187,7 +192,7 @@ def parser():
     root = argparse.ArgumentParser(prog='./lilac', description='Lilac source and build workspace')
     commands = root.add_subparsers(dest='command', required=True)
     diagnostic = commands.add_parser('doctor')
-    diagnostic.add_argument('--target', choices=['host', 'kernel', 'ramboot', 'userspace', 'system', 'xperable', 'mesa'], default='host')
+    diagnostic.add_argument('--target', choices=('host', *BUILD_TARGETS, *DEBUG_TARGETS), default='host')
     sources = commands.add_parser('sources')
     sources.add_argument('action', choices=['check'])
     deps = commands.add_parser('deps')
@@ -200,10 +205,13 @@ def parser():
     inputs.add_argument('kind', choices=['ios'])
     inputs.add_argument('--ipsw', type=Path, required=True)
     inputs.add_argument('--unpack', action='store_true')
-    builder = commands.add_parser('build')
-    builder.add_argument('target', choices=['kernel', 'ramboot', 'userspace', 'system', 'xperable', 'mesa', 'hardware'])
-    builder.add_argument('--output', type=Path)
-    builder.add_argument('-j', '--jobs', type=int, default=8)
+    for name, targets, description in (
+            ('build', BUILD_TARGETS, 'Build kernel, runtime, system image or host/graphics tools'),
+            ('debug', DEBUG_TARGETS, 'Build advanced RAM boot and hardware diagnostic images')):
+        builder = commands.add_parser(name, help=description)
+        builder.add_argument('target', choices=targets)
+        builder.add_argument('--output', type=Path)
+        builder.add_argument('-j', '--jobs', type=int, default=8)
     tests = commands.add_parser('test')
     tests.add_argument('group', choices=['host', 'integration'])
     tests.add_argument('--build', type=Path)
@@ -220,15 +228,17 @@ def parser():
 
 def run_command(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if len(arguments) >= 3 and arguments[0] == 'build' and arguments[1] in ('ramboot', 'userspace', 'system', 'hardware') and '--help' in arguments:
+    if len(arguments) >= 3 and '--help' in arguments and (
+            arguments[0] == 'build' and arguments[1] in ('userspace', 'system') or
+            arguments[0] == 'debug' and arguments[1] in DEBUG_TARGETS):
         return subprocess.call([sys.executable, '-m', 'tools.lilaclib.' + arguments[1], '--help'], cwd=ROOT, env=environment())
     arg_parser = parser()
     args, extra = arg_parser.parse_known_args(arguments)
-    if extra and args.command != 'build':
+    if extra and args.command not in ('build', 'debug'):
         arg_parser.error('unrecognized arguments: ' + ' '.join(extra))
     if getattr(args, 'jobs', 1) < 1:
         arg_parser.error('--jobs must be positive')
-    before = source_state() if args.command in ('build', 'deps', 'inputs', 'test') else None
+    before = source_state() if args.command in ('build', 'debug', 'deps', 'inputs', 'test') else None
     result = 0
     completed_output = None
     try:
@@ -245,7 +255,7 @@ def run_command(argv=None):
         elif args.command == 'inputs':
             subprocess.run([sys.executable, '-m', 'tools.lilaclib.ios', '--ipsw', str(args.ipsw),
                             *(['--unpack'] if args.unpack else [])], cwd=ROOT, env=environment(), check=True)
-        elif args.command == 'build':
+        elif args.command in ('build', 'debug'):
             completed_output = build(args.target, extra, args.output, args.jobs)
         elif args.command == 'test':
             result = test(args.group, args.build)

@@ -14,6 +14,7 @@ import sys
 
 from .paths import ROOT, HAKIOS, DEPS, local_path
 from . import ramboot
+from .probes import build_dynamic_probe, dynamic_probe_inputs
 
 SYSIMAGE = local_path('ios')
 
@@ -341,13 +342,8 @@ exec xnu-clang "$@"
          '-I' + str(HAKIOS / 'userland/libmini'), '-Wl,-e,_start', '-Wl,-pagezero_size,0x100000000',
          ROOT / 'userland/probe-init.c', HAKIOS / 'userland/libmini/mini.c',
          HAKIOS / 'userland/libmini/start.S', '-o', obj / 'probe-init'], 'static-build.log')
-    run(['bash', '-c', '''set -eu
-source "$1"
-shift
-exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
-''', 'lilac-dynamic-build', HAKIOS / 'xnu-env.sh',
-         '-arch', 'arm64', '-march=armv8-a', '-O1', HAKIOS / 'userland/src/hello_dyn.c',
-         '-o', obj / 'hello_dyn'], 'dynamic-build.log')
+    with (out / 'dynamic-build.log').open('w') as log:
+        build_dynamic_probe(obj / 'hello_dyn', log)
     if args.mobile_runtime and not args.fast_boot:
         for source,name,flags in [(ROOT/'userland/runtime-probe.c','runtime_probe',['-fblocks']),
                                   (ROOT/'userland/foundation-probe.m','foundation_probe',['-fobjc-arc','-framework','Foundation']),
@@ -471,6 +467,7 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
         inputs += [ROOT/'userland/system-probe.h',ROOT/'kernel/lilac-image.h',args.ufs_system_map.resolve()]
     inputs += mobile_inputs
     inputs += gpu_inputs
+    inputs += dynamic_probe_inputs()
     manifest = {
         'gpu_runtime_pm': args.gpu_runtime_pm, 'gpu_dynamic_clock': args.gpu_dynamic_clock,
         'touchscreen': args.touchscreen,

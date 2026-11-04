@@ -87,15 +87,41 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(os.readlink(latest), before)
 
     def test_command_detects_source_mutation_on_failure(self):
-        with patch.object(cli, 'source_state', side_effect=[{'file': 'before'}, {'file': 'after'}]), \
-                patch.object(cli, 'build', side_effect=ValueError('build failure')):
-            self.assertEqual(cli.run_command(['build', 'kernel']), 1)
+        for command in (['build', 'kernel'], ['debug', 'ramboot']):
+            with self.subTest(command=command), \
+                    patch.object(cli, 'source_state', side_effect=[{'file': 'before'}, {'file': 'after'}]), \
+                    patch.object(cli, 'build', side_effect=ValueError('build failure')):
+                self.assertEqual(cli.run_command(command), 1)
 
     def test_mutated_success_does_not_publish(self):
-        with patch.object(cli, 'source_state', side_effect=[{'file': 'before'}, {'file': 'after'}]), \
-                patch.object(cli, 'build', return_value=self.target), patch.object(cli, 'publish') as publish:
-            self.assertEqual(cli.run_command(['build', 'kernel']), 1)
-            publish.assert_not_called()
+        for command in (['build', 'kernel'], ['debug', 'hardware', '--touch']):
+            with self.subTest(command=command), \
+                    patch.object(cli, 'source_state', side_effect=[{'file': 'before'}, {'file': 'after'}]), \
+                    patch.object(cli, 'build', return_value=self.target), patch.object(cli, 'publish') as publish:
+                self.assertEqual(cli.run_command(command), 1)
+                publish.assert_not_called()
+
+    def test_debug_forwards_options_and_publishes_existing_target_name(self):
+        with patch.object(cli, 'source_state', return_value={}), \
+                patch.object(cli, 'build', return_value=self.target) as build, \
+                patch.object(cli, 'publish') as publish:
+            self.assertEqual(cli.run_command(['debug', 'hardware', '--touch', '--output', str(self.target)]), 0)
+        build.assert_called_once_with('hardware', ['--touch'], self.target, 8)
+        publish.assert_called_once_with('hardware', self.target)
+
+    def test_diagnostic_targets_require_debug_entry_point(self):
+        for target in ('ramboot', 'hardware'):
+            with self.subTest(target=target), self.assertRaises(SystemExit) as error:
+                cli.parser().parse_args(['build', target])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_target_help_uses_correct_command_group(self):
+        for command, target in (('debug', 'ramboot'), ('debug', 'hardware'), ('build', 'system')):
+            with self.subTest(target=target), patch.object(cli.subprocess, 'call', return_value=0) as call, \
+                    patch.object(cli, 'source_state') as state:
+                self.assertEqual(cli.run_command([command, target, '--help']), 0)
+                self.assertEqual(call.call_args.args[0][-2:], ['tools.lilaclib.' + target, '--help'])
+                state.assert_not_called()
 
     def test_build_rejects_source_destination_before_writing(self):
         with patch.object(cli, 'ROOT', self.root), patch.object(cli, 'execute_build') as execute:
@@ -115,7 +141,9 @@ class WorkspaceTests(unittest.TestCase):
         with patch.object(cli, 'execute_build', side_effect=ValueError('missing SDK')):
             with self.assertRaises(ValueError):
                 cli.build('ramboot', [], self.target)
-        self.assertEqual(json.loads((self.target / 'failure.json').read_text())['status'], 'failed')
+        report = json.loads((self.target / 'failure.json').read_text())
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['command'][:3], ['./lilac', 'debug', 'ramboot'])
 
     def test_source_guard_includes_generated_python_cache(self):
         with patch.object(records, 'ROOT', self.root):

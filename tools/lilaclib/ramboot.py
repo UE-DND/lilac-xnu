@@ -187,7 +187,7 @@ def validate_usb_debug_nodes(nodes):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(prog='./lilac debug ramboot', description=__doc__)
     p.add_argument('--output', type=Path, required=True, help='new output directory')
     p.add_argument('--kernel', type=Path, required=True)
     p.add_argument('--ramdisk', type=Path, help='explicit payload; default builds userland/src/hello.c')

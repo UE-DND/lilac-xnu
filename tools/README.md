@@ -10,6 +10,10 @@
 
 ## 常用工具说明
 
+日常构建使用 `./lilac build kernel|userspace|system|mesa|xperable`。基础 RAM 引导与硬件探测分别使用 `./lilac debug ramboot` 和 `./lilac debug hardware`；二者仍沿用统一的输出目录、构建记录及 `out/latest/` 发布机制。
+
+`lilaclib/probes.py` 提供 `userspace` 与 `system` 共用的小型用户程序编译流程，系统镜像无需读取用户空间构建的中间产物。
+
 ### 存储映射工具
 
 - **`prepare-ufs-map.py`**：依据 Android 系统中导出的 userdata 文件物理区间分布（FIEMAP）与 GPT 分区布局，生成供 XNU 只读镜像驱动解析的二进制区间映射文件 `system-map.bin`。

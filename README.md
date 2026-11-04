@@ -3,12 +3,17 @@
 > [!NOTE]
 > 1. 本仓库为实验性项目，所有移植工作由 GPT-6 Astra 完成
 > 2. 相机、GPU 等完整适配工作仍未完成，真机能够启动 iOS，但不推荐日常使用
+> 3. 若为 Docomo 日版机型，需先使用 xperable 解锁 bootloader
 
-`lilac-xnu` 是一个将 Apple XNU 内核及 Darwin 用户空间系统移植至 Sony Xperia XZ1 Compact（设备代号 `lilac`，高通 MSM8998 平台）的开源项目。项目涵盖底层引导器 BootShim、只读 UFS 驱动及系统物理区间映射、Adreno 540 硬件渲染加速、Synaptics S3330 多点触摸驱动以及 Darwin 基础运行环境。
+`lilac-xnu` 是一个将 Apple XNU 内核及 Darwin 用户空间系统移植至 Sony Xperia XZ1 Compact（设备代号 `lilac`，高通 MSM8998 平台）。项目涵盖底层引导器 BootShim、只读 UFS 驱动及系统物理区间映射、Adreno 540 硬件渲染加速、Synaptics S3330 多点触摸驱动以及 Darwin 基础运行环境。
 
 当前系统已实现由 BootShim 接管引导流程并加载 XNU 内核，挂载只读 APFS 系统卷，运行原版 Apple `launchd`，并通过 Mesa Freedreno 与 CoreAnimation 实现 GPU 桌面合成渲染。
 
 详细支持情况与已知限制参阅[项目状态](docs/STATUS.md)。
+
+<div align="center">
+  <img src=".github/assets/image.png" alt="" width="200">
+</div>
 
 ## 源码与环境
 
@@ -25,19 +30,19 @@ XNU、HakiOS、xperable 和 pe-parse 的固定源码快照直接集成在仓库�
 
 ### 本地材料配置
 
-SDK、IPSW 固件、Sony 专有固件、设备设备树（DTB）以及物理区间映射表属于用户私有材料，不随仓库分发。可以在 `local/config.json` 中配置材料路径，参考模板位于 [configs/local.example.json](configs/local.example.json)。显式传入的命令行参数优先于本地配置文件，本地配置优先于默认路径。
+SDK、IPSW 固件、Sony 专有固件、设备设备树（DTB）以及物理区间映射表属于用户私有材料，不随仓库分发。可以在 `local/config.json` 中配置材料路径，参考模板位于 [configs/local.example.json](configs/local.example.json)。
 
 ```sh
 ./lilac sources check
 ./lilac doctor
 ./lilac deps fetch
-./lilac deps build
 ```
 
 - `sources check`：核验源码目录结构与符号链接完整性。
 - `doctor`：检查当前主机环境的工具链与依赖完整度；可指定 `--target kernel` 等参数针对特定目标进行检查。
 - `deps fetch`：下载锁定的额外开源依赖项；支持 `--offline` 参数离线校验已有缓存。
-- `deps build`：构建内核及工具链所需的依赖产物。
+
+`build kernel` 会自动构建内核及工具链依赖，无需预先运行 `deps build`。如果只准备工具链、不编译内核，仍可单独执行 `./lilac deps build`。
 
 ## 构建流程
 
@@ -45,23 +50,19 @@ SDK、IPSW 固件、Sony 专有固件、设备设备树（DTB）以及物理区�
 # 1. 编译 XNU 内核
 ./lilac build kernel
 
-# 2. 构建基础 RAM 引导镜像
-./lilac build ramboot
-
-# 3. 提取并解包 iOS 运行时材料
+# 2. 提取并解包 iOS 运行时材料
 ./lilac inputs ios --ipsw /path/to/iOS-16.5.ipsw --unpack
 
-# 4. 构建用户空间运行镜像
-./lilac build userspace
-
-# 5. 构建 APFS 系统镜像
+# 3. 构建供 UFS 使用的 APFS 系统镜像
 ./lilac build system
 
-# 6. 编译 xperable 下载工具
-./lilac build xperable
+# 4. 构建用户空间 RAM 启动镜像
+./lilac build userspace
 ```
 
-各构建子命令默认使用最近一次成功构建的内核产物，也可以通过 `--kernel PATH` 显式指定。使用 `--output PATH` 可指定输出目录，构建成功后将自动刷新 `out/latest/<目标>` 软链接。
+`build userspace` 默认使用最近一次成功构建的内核，也可以通过 `--kernel PATH` 显式指定；它会自动编译 BootShim 并打包启动镜像。`build system` 自行编译所需的 `hello_dyn`，无需先构建 `userspace`，也可用 `--probe-binary PATH` 指定已有程序。使用 `--output PATH` 可指定新的输出目录，构建成功后将自动刷新 `out/latest/<目标>` 软链接。
+
+下载工具通过 `./lilac build xperable` 按需编译；Mesa 图形库的构建见下文。部署 UFS 系统镜像并生成映射表后，可使用下面的参数构建移动运行时启动镜像。
 
 ### 构建具备移动运行时的用户空间镜像
 
@@ -70,6 +71,8 @@ SDK、IPSW 固件、Sony 专有固件、设备设备树（DTB）以及物理区�
   --ufs-kernel-probe \
   --ufs-system-map configs/lilac/system-map.bin \
   --mobile-runtime \
+  --desktop-attempt \
+  --fast-boot \
   --desktop-bringup \
   --touchscreen
 ```
@@ -85,6 +88,20 @@ SDK、IPSW 固件、Sony 专有固件、设备设备树（DTB）以及物理区�
 
 Mesa 构建采用锁定的 25.0.7 源码与依赖版本，编译环境隔离在 `out/` 目录下。主机构建需配备 Bison 3 或更新版本、flex 及 LLVM 工具链。
 
+### 高级诊断镜像
+
+底层引导与硬件探测通过 `debug` 入口构建：
+
+```sh
+# 基础 RAM 引导镜像，默认运行 hello 程序
+./lilac debug ramboot
+
+# 触摸控制器探测镜像
+./lilac debug hardware --touch
+```
+
+原 `build ramboot`、`build hardware` 分别改为 `debug ramboot`、`debug hardware`；产物仍发布到 `out/latest/ramboot` 和 `out/latest/hardware`。这两项用于单独排查引导或驱动，不属于日常构建步骤。可通过 `./lilac debug ramboot --help` 或 `./lilac debug hardware --help` 查看诊断参数。
+
 ## 测试与校验
 
 项目提供完善的本地测试套件，分为主机单元测试与集成测试：
@@ -98,3 +115,7 @@ Mesa 构建采用锁定的 25.0.7 源码与依赖版本，编译环境隔离在 
 ```
 
 主机测试覆盖 UFS 命令解析、GPT 解析、BootShim 逻辑、内存对齐与输入协议；集成测试进一步核验 APFS 回读、镜像布局与固件兼容性。详见[验证规范文档](docs/VALIDATION.md)。
+
+---
+
+致谢所有上游项目

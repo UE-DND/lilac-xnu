@@ -236,7 +236,7 @@ def validate_resources(nodes):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Build an opt-in touch acquisition / GPU clock snapshot RAM probe, not a desktop image')
+    parser = argparse.ArgumentParser(prog='./lilac debug hardware', description='Build an opt-in touch acquisition / GPU clock snapshot RAM probe, not a desktop image')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--kernel', required=True, type=Path)
     parser.add_argument('--dtb', type=Path, default=local_path('dtb'))
