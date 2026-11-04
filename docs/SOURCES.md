@@ -14,12 +14,15 @@
 
 `sources/xnu/` 是内核构建的权威源码目录，整合了 Apple 原始 XNU、HakiOS、HFS 以及本项目对 MSM8998 与 Xperia XZ1 Compact 的适配补丁。`sources/hakios/` 仅保留构建辅助工具与驱动配置元数据，不重复维护内核实现代码。
 
-各子目录完整保留了上游项目的 LICENSE、NOTICE、第三方许可文件及头部版权声明：
-- `sources/xnu/` 遵循 Apple Public Source License（APSL 2.0）。
-- APFS 模块中的 libdeflate 遵循 MIT 许可证（详见 `sources/xnu/bsd/miscfs/apfs/libdeflate/COPYING`）。
-- HFS 模块保留原始版权声明并受 APSL 约束。
-- `third_party/pe-parse/` 遵循 MIT 许可证。
-- 本项目整体未设置统一的顶层许可证，各模块分别受其对应开源许可证约束。
+本项目原创、且不受其他许可约束的代码和文档采用根目录的 [MIT 许可证](../LICENSE)。该许可证不替代第三方源码及其衍生文件的许可；对上游文件的修改仍须遵循原文件适用的条款。具体范围以各文件的版权声明、许可证和随附通知为准：
+
+- `sources/xnu/` 包含 Apple XNU 和 HFS 源码及其修改，主要受 [APSL 2.0](../sources/xnu/APPLE_LICENSE) 约束；其中包含的其他组件可能使用不同许可。
+- APFS 模块中的 libdeflate 使用 [MIT 许可证](../sources/xnu/bsd/miscfs/apfs/libdeflate/COPYING)。
+- `sources/hakios/` 的许可及第三方组件说明见其 [LICENSE](../sources/hakios/LICENSE)、[NOTICE](../sources/hakios/NOTICE) 和 [THIRD_PARTY_LICENSES.md](../sources/hakios/THIRD_PARTY_LICENSES.md)。
+- `sources/xperable/` 使用 [GNU GPL v3](../sources/xperable/LICENSE)，具体条款以其源码声明为准。
+- `third_party/pe-parse/` 使用 [MIT 许可证](../third_party/pe-parse/LICENSE)。
+
+分发这些源码或衍生作品时，应保留适用的上游版权和许可声明。仓库中的符号链接指向的内容以目标文件的许可为准。
 
 ## 外部依赖与离线构建
 
