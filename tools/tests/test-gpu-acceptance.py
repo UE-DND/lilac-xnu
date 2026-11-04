@@ -24,11 +24,11 @@ MiniIOMobileFramebuffer: 146 frames in 5010 ms
 A540 stop: sequence=100 completed=100 MMU=1 memory=1 PM8005=1 MX=1 CX=1
 '''
 
-    def validate(self, text):
+    def validate(self, text, extended=False):
         data = text.encode()
         receipt = {'status': 'log_saved_fastboot_verified', 'bytes': len(data),
                    'sha256': hashlib.sha256(data).hexdigest()}
-        return check.validate(data, receipt, {'partition_writes': False, 'firmware_updates': False})
+        return check.validate(data, receipt, {'partition_writes': False, 'firmware_updates': False}, extended)
 
     def test_full_evidence(self):
         self.assertEqual(self.validate(self.log)['submissions_completed'], 100)
@@ -43,6 +43,31 @@ A540 stop: sequence=100 completed=100 MMU=1 memory=1 PM8005=1 MX=1 CX=1
                     self.validate(self.log.replace(old, new))
         with self.assertRaises(ValueError):
             self.validate(self.log+'A540 HARDWARE RENDER: FAIL late mismatch\n')
+
+    def test_extended_evidence_and_late_failures(self):
+        extra = 'SMP WORK: PASS active=8 executed_mask=ff permission_changes=512 data_errors=0\n'
+        extra += ''.join(f'SMP IRQ: cpu={i} IPI=10 timer=100\n' for i in range(8))
+        extra += ''.join(f'psci: cpu {i} firmware confirmed OFF\n' for i in range(1,8))
+        extra += 'A540 PROCESS ISOLATION: PASS same VA=4000000 peer=4000000\n'
+        for index,address in enumerate(('2018040','2000000','4010000','831')):
+            extra += f'A540 PROTECTION: PASS target={address} rejected and next client completed\n'
+            extra += f'submissions disabled: context hardware fault\nquarantined context={index+1} canceled_through={index+1} reset confirmed\n'
+            extra += f'final render state FSR=408 FAR={address} RBBM=1\n'
+        extra += 'clock: idle=180000000 Hz\nclock: active=257000000 Hz\n'
+        extra += 'render faults: CP interrupt=0 hardware=0 protection=50020c4\n'
+        extra += 'PM: suspended sequence=1\nPM: resumed sequence=1\n' * 3
+        extra += 'authenticated image 13, dedicated memory=a6000000\n' * 4
+        text=extra+self.log
+        self.assertEqual(self.validate(text,True)['status'],'passed')
+        for old,new in [('cpu=7 IPI=10','cpu=7 IPI=0'),('executed_mask=ff','executed_mask=7f'),
+                        ('target=831 rejected','target=832 rejected'),('FAR=2018040','FAR=0'),
+                        ('cpu 7 firmware confirmed OFF','cpu 7 unknown'),('permission_changes=512','permission_changes=16'),
+                        ('protection=50020c4','protection=0')]:
+            with self.subTest(old=old), self.assertRaises(ValueError): self.validate(text.replace(old,new),True)
+        with self.assertRaises(ValueError): self.validate(text+'submissions disabled: unexplained late fault\n',True)
+        with self.assertRaises(ValueError): self.validate(self.log+'render faults: CP interrupt=0 hardware=1 protection=0\n')
+        # Runtime PM adds earlier stops; only the final one proves shutdown.
+        self.assertEqual(self.validate('A540 stop: sequence=0 completed=0 MMU=1 memory=1 PM8005=1 MX=1 CX=1\n'+self.log)['submissions_completed'],100)
 
     def test_log_authenticity_is_required(self):
         with self.assertRaises(ValueError):

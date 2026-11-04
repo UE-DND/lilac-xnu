@@ -12,6 +12,8 @@ struct lilac_pm8005_io {
     int (*read)(void *, uint64_t, uint32_t *);
     int (*write)(void *, uint64_t, uint32_t);
     void (*delay)(void *, uint32_t);
+    void (*lock)(void *);
+    void (*unlock)(void *);
 };
 struct lilac_pm8005 {
     uint32_t channel, version, last_status;
@@ -36,7 +38,7 @@ static inline int lilac_pm8005_channel(const struct lilac_pm8005_io *io, struct 
     }
     return 0;
 }
-static inline int lilac_pm8005_transfer(const struct lilac_pm8005_io *io, struct lilac_pm8005 *p,
+static inline int lilac_pm8005_transfer_locked(const struct lilac_pm8005_io *io, struct lilac_pm8005 *p,
     uint32_t offset, uint32_t bytes, uint32_t *value, int write)
 {
     if (!p->available || !value ||
@@ -59,6 +61,14 @@ static inline int lilac_pm8005_transfer(const struct lilac_pm8005_io *io, struct
         io->delay(io->context, 1);
     }
     return 0;
+}
+static inline int lilac_pm8005_transfer(const struct lilac_pm8005_io *io, struct lilac_pm8005 *p,
+    uint32_t offset, uint32_t bytes, uint32_t *value, int write)
+{
+    if (io->lock) io->lock(io->context);
+    int result = lilac_pm8005_transfer_locked(io, p, offset, bytes, value, write);
+    if (io->unlock) io->unlock(io->context);
+    return result;
 }
 static inline int lilac_pm8005_snapshot(const struct lilac_pm8005_io *io, struct lilac_pm8005 *p)
 {

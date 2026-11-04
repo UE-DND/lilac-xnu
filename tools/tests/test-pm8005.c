@@ -48,7 +48,7 @@ static struct fake initial(void)
 int main(void)
 {
     struct fake f=initial(); struct lilac_pm8005 p;
-    const struct lilac_pm8005_io io={&f,read32,write32,delay};
+    const struct lilac_pm8005_io io={&f,read32,write32,delay,NULL,NULL};
     assert(lilac_pm8005_snapshot(&io,&p) && p.millivolts==600 && p.channel==11 && !f.writes);
     assert(!lilac_pm8005_on(&io,&p,1088) && !f.writes);
     assert(lilac_pm8005_on(&io,&p,724) && f.regs[8]==0x80);

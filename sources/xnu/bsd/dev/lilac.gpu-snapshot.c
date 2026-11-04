@@ -18,6 +18,7 @@ int lilac_a540_probe(void);
 static int lilac_a540_probe(void) { return 1; }
 #endif
 int lilac_a540_cx_release(void);
+int lilac_a540_cx_acquire(void);
 bool lilac_gpu_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
 static struct lilac_gpu_snapshot gpu_snapshot = {.version = LILAC_HARDWARE_VERSION};
 static struct lilac_a540_cx_result cx_result = {.result = LILAC_CX_BAD_ARGUMENT};
@@ -119,8 +120,21 @@ int lilac_a540_cx_release(void)
     cx_delay(&probe,500);
     int ok = !!(cx_read(&probe,LILAC_A540_CX_GDSCR) & LILAC_A540_CX_COLLAPSE);
     printf("lilac A540 CX: retained vote released=%u status=%x\n",ok,cx_read(&probe,LILAC_A540_CX_HW_STATUS));
-    if (ok) retained_cx = 0;
+
     return ok;
+}
+int lilac_a540_cx_acquire(void)
+{
+    if (!retained_cx) return 0;
+    struct gpu_probe_io probe={retained_cx,0};
+    uint32_t current=cx_read(&probe,LILAC_A540_CX_GDSCR);
+    if (!(current & LILAC_A540_CX_COLLAPSE)) return 0;
+    cx_write(&probe,LILAC_A540_CX_GDSCR,current & ~LILAC_A540_CX_COLLAPSE);
+    for (unsigned i=0;i<1500;i++) {
+        if (cx_read(&probe,LILAC_A540_CX_HW_STATUS)&LILAC_A540_CX_POWER_ON) { cx_delay(&probe,1); return 1; }
+        cx_delay(&probe,1);
+    }
+    return 0;
 }
 /* The access guard covers only this function's load instruction and the
  * explicitly listed SMMU registers. Secure contexts 1 and 2 are not read. */

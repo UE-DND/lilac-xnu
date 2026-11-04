@@ -23,9 +23,9 @@
  * memory is ordinary, cached memory, which everybody else reads and writes as such.
  *
  * Not here yet: interrupts (waiting is asking again five times a millisecond), more than one
- * program's worth of care (every client's buffers are in the one address space; a client that
- * goes takes its own away), recovery of a GPU that has stopped answering (it is reported, see
- * hakios_gpu_report(), and stays stopped), fences and buffers as file descriptors.
+ * ring, fences and buffers as file descriptors. A540 uses per-client page tables,
+ * privileged completion memory and reset after a client fault; A642L retains
+ * its existing shared-address-space behavior.
  */
 
 #include <IOKit/IOLib.h>
@@ -37,11 +37,15 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <kern/clock.h>
+#include <kern/thread_call.h>
 #include <mach/mach_time.h>
 #include <mach/vm_param.h>
 #include <sys/systm.h>
 
 #include "MiniIOSurface.h"
+#if defined(HAKIOS_A540)
+#include "../../../../kernel/lilac-a540-context.h"
+#endif
 
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
 
@@ -62,6 +66,10 @@ uint32_t hakios_gpu_last(void);
 void hakios_gpu_worked(uint64_t * microseconds, uint32_t * submissions, uint32_t by[7]);
 void hakios_gpu_report(const char * why);
 void hakios_gpu_stop(void);
+#if defined(HAKIOS_A540)
+void lilac_a540_tick(void);
+bool lilac_a540_suspend(void), lilac_a540_resume(void);
+#endif
 
 void HakiosGPUStart(void);
 void HakiosGPUStop(void);
@@ -175,7 +183,38 @@ struct hakios_show {
 
 static IOLock * gGPULock;                       /* around everything that is the GPU's (hakios_gpu_...) */
 static bool gGPUReported;
+#if defined(HAKIOS_A540)
+static bool gGPUSystemSuspended;
+#endif
 static bool gGPUCached;                         /* boot-arg gpu_cached=1 */
+
+/* Entry points without gGPULock must wait for a concurrent resume. During
+ * A540 reinitialization gpu_kept is temporarily false; exposing that state to
+ * GEM_NEW makes a healthy client's shader allocation fail with NotReady. */
+static bool
+gpuReady(void)
+{
+    IOLockLock(gGPULock);
+    bool ready = hakios_gpu_ready();
+    IOLockUnlock(gGPULock);
+    return ready;
+}
+
+#if defined(HAKIOS_A540)
+static thread_call_t gGPUPowerCall;
+static void gpuPowerTick(thread_call_param_t, thread_call_param_t)
+{
+    IOLockLock(gGPULock);
+    lilac_a540_tick();
+    bool running=hakios_gpu_ready();
+    IOLockUnlock(gGPULock);
+    if (running) {
+        uint64_t deadline;
+        clock_interval_to_deadline(100,NSEC_PER_MSEC,&deadline);
+        thread_call_enter_delayed(gGPUPowerCall,deadline);
+    }
+}
+#endif
 
 /* What the last seconds' submissions were and cost here, for the log. */
 static struct {
@@ -193,8 +232,11 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 	uint64_t began = mach_absolute_time(), patience;
 
 	nanoseconds_to_absolutetime(milliseconds * NSEC_PER_MSEC, &patience);
-	for (bool waited = false;; waited = true) {
-		if (hakios_gpu_done(fence)) {
+    for (bool waited = false;; waited = true) {
+#if defined(HAKIOS_A540)
+        if (lilac_gpu_poll_fault() || lilac_gpu_fence_failed(fence)) return false;
+#endif
+        if (hakios_gpu_done(fence)) {
 			if (waited) {
 				gGPUStat.waits++;
 				gGPUStat.waiting += mach_absolute_time() - began;
@@ -210,7 +252,10 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 	}
 	if (milliseconds >= 1000 && !gGPUReported) {
 		gGPUReported = true;
-		hakios_gpu_report("no answer");
+        hakios_gpu_report("no answer");
+#if defined(HAKIOS_A540)
+        gGPUReported=!lilac_gpu_operational();
+#endif
 	}
 	return false;
 }
@@ -299,10 +344,23 @@ class HakiosGPU : public IOService
 	OSDeclareDefaultStructors(HakiosGPU);
 
 public:
-	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+    virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+#if defined(HAKIOS_A540)
+    virtual IOReturn setPowerState(unsigned long, IOService *) APPLE_KEXT_OVERRIDE;
+#endif
 };
 
 OSDefineMetaClassAndStructors(HakiosGPU, IOService);
+#if defined(HAKIOS_A540)
+IOReturn HakiosGPU::setPowerState(unsigned long state, IOService *)
+{
+    IOLockLock(gGPULock);
+    gGPUSystemSuspended=!state;
+    bool ok=state ? lilac_a540_resume() : (gpuWait(hakios_gpu_last(),1000) && lilac_a540_suspend());
+    IOLockUnlock(gGPULock);
+    return ok ? IOPMAckImplied : kIOReturnNotReady;
+}
+#endif
 
 bool
 HakiosGPU::start(IOService * provider)
@@ -310,6 +368,19 @@ HakiosGPU::start(IOService * provider)
 	if (!IOService::start(provider)) {
 		return false;
 	}
+#if defined(HAKIOS_A540)
+    static IOPMPowerState states[2] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,kIOPMPowerOn,kIOPMPowerOn,kIOPMPowerOn,0,0,0,0,0,0,0,0}
+    };
+    PMinit(); provider->joinPMtree(this); registerPowerDriver(this,states,2);
+    changePowerStateTo(1);
+    gGPUPowerCall=thread_call_allocate(gpuPowerTick,NULL);
+    if (gGPUPowerCall) {
+        uint64_t deadline; clock_interval_to_deadline(100,NSEC_PER_MSEC,&deadline);
+        thread_call_enter_delayed(gGPUPowerCall,deadline);
+    }
+#endif
 	setProperty(kIOUserClientClassKey, "HakiosGPUUserClient");
 	setName("HakiosGPU");
 	registerService();
@@ -407,6 +478,14 @@ static TUNABLE(uint32_t, gGPUKeep, "gpu_keep", 1);      /* boot-arg gpu_keep=0 (
 
 class HakiosGPUUserClient : public IOUserClient
 {
+#if defined(HAKIOS_A540)
+    struct lilac_gpu_context *fContext;
+    uint64_t hakios_gpu_address(uint64_t size) { return lilac_gpu_context_address(fContext,size); }
+    void hakios_gpu_address_free(uint64_t a,uint64_t n) { lilac_gpu_context_address_free(fContext,a,n); }
+    bool hakios_gpu_map(uint64_t a,uint64_t p,bool r) { return lilac_gpu_context_map(fContext,a,p,r); }
+    void hakios_gpu_unmap(uint64_t a,uint64_t n) { lilac_gpu_context_unmap(fContext,a,n); }
+    uint32_t hakios_gpu_submit(const uint64_t *a,const uint32_t *w,uint32_t n) { return lilac_gpu_context_submit(fContext,a,w,n); }
+#endif
 	OSDeclareDefaultStructors(HakiosGPUUserClient);
 
 	task_t                  fTask;
@@ -459,11 +538,17 @@ HakiosGPUUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 t
 bool
 HakiosGPUUserClient::start(IOService * provider)
 {
-	if (!hakios_gpu_ready() || !IOUserClient::start(provider)) {
+    if (!gpuReady() || !IOUserClient::start(provider)) {
 		return false;
 	}
-	fBuffers = IONewZero(struct gpu_buffer, GPU_BUFFERS);
-	return fBuffers != NULL;
+    fBuffers = IONewZero(struct gpu_buffer, GPU_BUFFERS);
+#if defined(HAKIOS_A540)
+    if (!fBuffers) return false;
+    IOLockLock(gGPULock); fContext=lilac_gpu_context_create(); IOLockUnlock(gGPULock);
+    return fContext != NULL;
+#else
+    return fBuffers != NULL;
+#endif
 }
 
 /*
@@ -479,17 +564,30 @@ HakiosGPUUserClient::freeBuffer(struct gpu_buffer * slot)
 	 * a second close of the same handle (or the client's closing) cannot free the same memory and address twice.
 	 */
 	struct gpu_buffer saved = *slot;
-	struct gpu_buffer * b = &saved;
+    struct gpu_buffer * b = &saved;
+#if defined(HAKIOS_A540)
+    /* The BO list is untrusted; an IB can reference any mapped address in
+     * its context. Retire all allocations against that context's last work. */
+    b->fence=lilac_gpu_context_last(fContext);
+#endif
 
-	slot->memory = NULL;
+    slot->memory = NULL;
 	slot->surface = NULL;
 	fBufferCount--;
 	fBufferBytes -= b->size;
 
-	bool busy = hakios_gpu_ready() && b->fence != 0 && !hakios_gpu_done(b->fence);
+#if defined(HAKIOS_A540)
+    bool busy=!lilac_gpu_context_retire(fContext);
+#else
+    bool busy = hakios_gpu_ready() && b->fence != 0 && !hakios_gpu_done(b->fence);
+#endif
 
 	if (busy && fLeftCount == GPU_LEFT) {
-		busy = !gpuWait(b->fence, 1000);        /* (nowhere to keep it: this one is waited for) */
+#if defined(HAKIOS_A540)
+        busy=!lilac_gpu_context_retire(fContext);
+#else
+        busy = !gpuWait(b->fence, 1000);
+#endif
 	}
 	if (busy && fLeftCount < GPU_LEFT) {
 		struct gpu_left * left = &fLeft[fLeftCount++];
@@ -534,7 +632,11 @@ HakiosGPUUserClient::reap(void)
 	for (uint32_t i = 0; i < fLeftCount;) {
 		struct gpu_left * left = &fLeft[i];
 
-		if (hakios_gpu_ready() && !hakios_gpu_done(left->fence)) {
+#if defined(HAKIOS_A540)
+        if (!lilac_gpu_context_retire(fContext)) {
+#else
+        if (hakios_gpu_ready() && !hakios_gpu_done(left->fence)) {
+#endif
 			i++;
 			continue;
 		}
@@ -587,6 +689,11 @@ HakiosGPUUserClient::clientClose(void)
 void
 HakiosGPUUserClient::free(void)
 {
+#if defined(HAKIOS_A540)
+    if (fContext) {
+        IOLockLock(gGPULock); lilac_gpu_context_destroy(fContext); fContext=NULL; IOLockUnlock(gGPULock);
+    }
+#endif
 	if (fBuffers != NULL) {
 		IODelete(fBuffers, struct gpu_buffer, GPU_BUFFERS);
 		fBuffers = NULL;
@@ -663,6 +770,12 @@ HakiosGPUUserClient::dropKept(struct gpu_kept * k)
 	if (k->memory == NULL) {
 		return;
 	}
+#if defined(HAKIOS_A540)
+    if (!lilac_gpu_context_retire(fContext)) {
+        /* Retain its only reference and mapping if reset was unconfirmed. */
+        k->memory=NULL; fKeptBytes-=k->size; return;
+    }
+#endif
 	if (hakios_gpu_ready()) {
 		hakios_gpu_unmap(k->address, k->size);
 		hakios_gpu_address_free(k->address, k->size);
@@ -908,9 +1021,17 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 		ret = kIOReturnVMError;
 		goto out;
 	}
-	IOLockLock(gGPULock);
-	/*
-	 * The GPU reads memory and writes memory. What this processor's cache holds of an IOSurface
+    IOLockLock(gGPULock);
+#if defined(HAKIOS_A540)
+    if (gGPUSystemSuspended || lilac_gpu_context_failed(fContext)) {
+        IOLockUnlock(gGPULock); ret=kIOReturnNotReady; goto out;
+    }
+#endif
+    for (uint32_t i=0;i<request->nr_bos;i++) {
+        if (!buffer(bos[i].handle)) { IOLockUnlock(gGPULock); goto out; }
+    }
+    /*
+     * The GPU reads memory and writes memory. What this processor's cache holds of an IOSurface
 	 * (somebody has written it, or has read it, as the display's driver does, and the GPU is to
 	 * draw into it again) goes out of the cache now: when the surface is said to have changed
 	 * (its seed: who writes one is to lock it, and so does a program that has had the GPU draw
@@ -948,8 +1069,8 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 	for (uint32_t i = 0; i < request->nr_cmds; i++) {
 		struct gpu_buffer * b = cmds[i].submit_idx < request->nr_bos ? buffer(bos[cmds[i].submit_idx].handle) : NULL;
 
-		if (cmds[i].type != MSM_SUBMIT_CMD_BUF) {
-			continue;                               /* the other kinds are for a GPU shared between address spaces */
+		if (cmds[i].type != MSM_SUBMIT_CMD_BUF && cmds[i].type != 2) {
+			continue;                               /* type 2 restores rendering state when contexts alternate */
 		}
 		if (b == NULL || cmds[i].nr_relocs != 0 || (cmds[i].size & 3) || (cmds[i].submit_offset & 3) ||
 		    (uint64_t) cmds[i].submit_offset + cmds[i].size > b->size) {
@@ -961,7 +1082,8 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 		addresses[count] = b->address + cmds[i].submit_offset;
 		words[count++] = cmds[i].size / 4;
 	}
-	request->fence = hakios_gpu_submit(addresses, words, count);
+    if (!count) { IOLockUnlock(gGPULock); goto out; }
+    request->fence = hakios_gpu_submit(addresses, words, count);
 	if (gpu_log && request->fence != 0) {
 		/* "tl: Q FENCE at US: N buffers, B of 4 MB or more, W words of commands": what was given (tl: q: what it took) */
 		uint32_t big = 0, all_words = 0;
@@ -1000,7 +1122,10 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 	reap();
 	if (request->fence == 0 && !gGPUReported) {
 		gGPUReported = true;
-		hakios_gpu_report("the ring is full");
+        hakios_gpu_report("the ring is full");
+#if defined(HAKIOS_A540)
+        gGPUReported=!lilac_gpu_operational();
+#endif
 	}
 	if (fSubmits++ < 4) {
 		/* (addresses and words are only set up to `count`: with no command buffer among the commands, the first would be stack garbage) */
@@ -1125,7 +1250,7 @@ HakiosGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 	if (args->structureInput == NULL || size > sizeof(r) || fBuffers == NULL) {
 		return kIOReturnBadArgument;
 	}
-	if (!hakios_gpu_ready() && selector != kHakiosShow) {
+	if (!gpuReady() && selector != kHakiosShow) {
 		return kIOReturnNotReady;                       /* given back: the run is ending */
 	}
 	bzero(&r, sizeof(r));
@@ -1161,8 +1286,13 @@ HakiosGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 	case kMsmGemSubmit:
 		ret = submit(&r.submit);
 		break;
-	case kMsmWaitFence:
-		waitBegan = mach_absolute_time();
+    case kMsmWaitFence:
+#if defined(HAKIOS_A540)
+        IOLockLock(gGPULock);
+        if (lilac_gpu_context_failed(fContext)) { IOLockUnlock(gGPULock); return kIOReturnIOError; }
+        IOLockUnlock(gGPULock);
+#endif
+        waitBegan = mach_absolute_time();
 		IOLockLock(gGPULock);
 		/* a fence that was never issued is never done: refuse it, so that waiting for it cannot make gpuWait() declare the GPU dead for every client */
 		if ((int32_t)(r.waitFence.fence - hakios_gpu_last()) > 0) {

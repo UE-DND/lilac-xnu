@@ -17,8 +17,8 @@ struct lilac_a5xx_ib { uint64_t address; uint32_t dwords; };
 
 /* No bytes or write index change when inputs are invalid or space is short.
  * Fence memory must be a writable GPU mapping with normal cache protocol. */
-static inline int lilac_a5xx_submit(struct lilac_a5xx_ring *ring, size_t read_index,
-    const struct lilac_a5xx_ib *ibs, size_t count, uint64_t fence_address, uint32_t sequence)
+static inline int lilac_a5xx_submit_mode(struct lilac_a5xx_ring *ring, size_t read_index,
+    const struct lilac_a5xx_ib *ibs, size_t count, uint64_t fence_address, uint32_t sequence, int private_fence)
 {
     if (!ring || !ring->words || ring->count < 2 || (ring->count & (ring->count - 1)) ||
         ring->write_index >= ring->count || read_index >= ring->count || !ibs ||
@@ -33,15 +33,41 @@ static inline int lilac_a5xx_submit(struct lilac_a5xx_ring *ring, size_t read_in
             submitted[i].address >= LILAC_A5XX_VA_LIMIT || bytes > LILAC_A5XX_VA_LIMIT - submitted[i].address)
             return 0;
     }
-    size_t needed = count * 4 + 5;
+    uint32_t tail[32], zero=0, one=1;
+    struct lilac_pm4 stream={tail,32,0};
+    if (private_fence) {
+        lilac_pm4_type7(&stream,0x26,NULL,0); /* WAIT_FOR_IDLE */
+        lilac_pm4_type7(&stream,0x13,NULL,0); /* WAIT_FOR_ME */
+        lilac_pm4_type7(&stream,0x5f,&zero,1);
+        lilac_pm4_type4(&stream,0x831,&one,1); /* CP_CNTL.APRIV */
+        lilac_pm4_type7(&stream,0x5f,&one,1);
+    }
+    uint32_t fence[] = {LILAC_A5XX_CACHE_FLUSH_TS, (uint32_t)fence_address,
+                        (uint32_t)(fence_address >> 32), sequence};
+    lilac_pm4_type7(&stream,LILAC_A5XX_CP_EVENT_WRITE,fence,4);
+    if (private_fence) {
+        lilac_pm4_type7(&stream,0x26,NULL,0);
+        lilac_pm4_type7(&stream,0x13,NULL,0);
+        lilac_pm4_type7(&stream,0x5f,&zero,1);
+        lilac_pm4_type4(&stream,0x831,&zero,1);
+        lilac_pm4_type7(&stream,0x5f,&one,1);
+    }
+    size_t needed = count * 4 + stream.used;
     size_t free_words = (read_index - ring->write_index - 1) & (ring->count - 1);
     if (needed > free_words) return 0;
     for (size_t i = 0; i < count; i++) {
         uint32_t payload[] = {(uint32_t)submitted[i].address, (uint32_t)(submitted[i].address >> 32), submitted[i].dwords};
         if (!lilac_a5xx_ring_packet7(ring, read_index, LILAC_A5XX_CP_INDIRECT_BUFFER_PFE, payload, 3)) return 0;
     }
-    uint32_t fence[] = {LILAC_A5XX_CACHE_FLUSH_TS, (uint32_t)fence_address,
-                        (uint32_t)(fence_address >> 32), sequence};
-    return lilac_a5xx_ring_packet7(ring, read_index, LILAC_A5XX_CP_EVENT_WRITE, fence, 4);
+    for (size_t i=0;i<stream.used;i++) {
+        ring->words[ring->write_index]=tail[i];
+        ring->write_index=(ring->write_index+1)&(ring->count-1);
+    }
+    return 1;
+}
+static inline int lilac_a5xx_submit(struct lilac_a5xx_ring *ring, size_t read_index,
+    const struct lilac_a5xx_ib *ibs, size_t count, uint64_t fence_address, uint32_t sequence)
+{
+    return lilac_a5xx_submit_mode(ring,read_index,ibs,count,fence_address,sequence,0);
 }
 #endif

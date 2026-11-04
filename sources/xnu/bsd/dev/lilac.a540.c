@@ -13,11 +13,13 @@
 #include <vm/vm_kern.h>
 #include "../../../../kernel/lilac-pm8005.h"
 #include "../../../../kernel/lilac-a540-power.h"
+#include "../../../../kernel/lilac-a540-clock.h"
 #include "../../../../kernel/lilac-rpm-api.h"
 #include "../../../../kernel/lilac-a540-me.h"
 #include "../../../../kernel/lilac-a540-zap.h"
 #include "../../../../kernel/lilac-a5xx-submit.h"
 #include "../../../../kernel/lilac-gpu-va.h"
+#include "../../../../kernel/lilac-a540-context.h"
 #include <mach/mach_time.h>
 #include <sys/hakios.input.h>
 #if defined(HAKIOS_ADRENO)
@@ -25,6 +27,9 @@
 #endif
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern void hakios_spmi_lock(void), hakios_spmi_unlock(void);
+static void lilac_gpu_spmi_lock(__unused void *context) { hakios_spmi_lock(); }
+static void lilac_gpu_spmi_unlock(__unused void *context) { hakios_spmi_unlock(); }
 extern int lilac_a540_load32(vm_offset_t, uint32_t *);
 extern int lilac_a540_store32(vm_offset_t, uint32_t);
 extern int lilac_a540_store64(vm_offset_t, uint64_t);
@@ -134,16 +139,42 @@ static const uint64_t cp_bus_address[] = {0x00146040, 0x00171010};
 static struct lilac_a5xx_ring cp_commands;
 static bool zap_pending;
 static bool render_domains;
-static bool gpu_kept, gpu_failed, gpu_service;
+static bool gpu_kept, gpu_failed, gpu_service, gpu_awake, power_uncertain;
+static uint32_t gpu_pm_enabled, gpu_clock_enabled;
+static uint64_t gpu_activity;
+static struct lilac_a540_clock gpu_clock;
+static vm_offset_t zap_metadata, zap_image, smoke_commands;
+bool lilac_a540_suspend(void), lilac_a540_resume(void);
+void lilac_a540_tick(void);
 static uint32_t gpu_sequence;
+static uint32_t gpu_idle_sequence;
 uint32_t gpu_log;
-static vm_offset_t user_tables;
-static struct lilac_gpu_va gpu_va;
+struct lilac_gpu_context {
+    struct lilac_gpu_va va;
+    vm_offset_t tables, leaves;
+    uint32_t id, last;
+    bool failed;
+};
+static struct lilac_gpu_context *active_context;
+static uint32_t context_count, context_serial, context_switches;
+static int user_tlb_sync(void);
+static bool gpu_power_down(void);
+static struct {uint32_t first,last;} failed_fences[16];
+static unsigned fault_count;
+uint32_t lilac_gpu_context_last(struct lilac_gpu_context *ctx) { return ctx ? ctx->last : 0; }
+bool lilac_gpu_operational(void) { return gpu_kept && !gpu_failed; }
+bool lilac_gpu_context_failed(struct lilac_gpu_context *ctx) { return !ctx || ctx->failed || gpu_failed; }
+bool lilac_gpu_fence_failed(uint32_t fence)
+{
+    for (unsigned i=0;i<fault_count;i++)
+        if ((int32_t)(fence-failed_fences[i].first)>=0 && (int32_t)(failed_fences[i].last-fence)>=0) return true;
+    return false;
+}
 static struct lilac_pm8005 retained_pm;
 static struct lilac_a540_power retained_power;
 static uint32_t retained_memacc;
 extern void HakiosGPUStart(void), HakiosGPUStop(void);
-extern int lilac_a540_cx_release(void);
+extern int lilac_a540_cx_release(void), lilac_a540_cx_acquire(void);
 
 static const uint8_t *gpu_firmware(const char *name, uint64_t *size)
 {
@@ -192,6 +223,14 @@ static int cp_buffer(uint64_t address, uint32_t bytes, const uint8_t *source, vm
 }
 static int cp_memory(void)
 {
+    if (cp_tables && cp_ring && cp_fence) {
+        bzero((void *)cp_ring,32768); cache_flush(cp_ring,32768);
+        cp_commands.write_index=0;
+        uint64_t *leaves=(void *)(cp_tables+8192);
+        for (unsigned i=0;i<512;i++) if (leaves[i]) leaves[i]=(leaves[i]|0x40)&~0x80ull;
+        cache_flush(cp_tables,PAGE_SIZE);
+        return 1;
+    }
     uint64_t pm4_size = 0, pfp_size = 0;
     const uint8_t *pm4 = gpu_firmware("a530_pm4.fw",&pm4_size);
     const uint8_t *pfp = gpu_firmware("a530_pfp.fw",&pfp_size);
@@ -209,17 +248,6 @@ static int cp_memory(void)
     printf("lilac A540 CP: firmware PM4=%llu PFP=%llu, isolated 4K tables root=%llx\n",pm4_size,pfp_size,kvtophys(cp_tables));
     printf("lilac A540 MMU: L1=%llx L2=%llx PTE0=%llx ring physical=%llx\n",
         root[0],middle[16],((uint64_t *)(cp_tables + 8192))[0],kvtophys(cp_ring));
-    return 1;
-}
-static int user_memory(void)
-{
-    /* Reserve all leaf tables up front: no allocator or table replacement
-     * races with the device after service publication. Only CB0 is used. */
-    const uint32_t bytes = 480*4096;
-    if (kmem_alloc(kernel_map,&user_tables,round_page(bytes),KMA_KOBJECT | KMA_ZERO | KMA_DATA,VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return 0;
-    uint64_t *middle = (uint64_t *)(cp_tables+4096);
-    for (unsigned i = 32; i < 512; i++) middle[i] = kvtophys(user_tables+(i-32)*4096) | 3;
-    cache_flush(user_tables,bytes); cache_flush(cp_tables,PAGE_SIZE);
     return 1;
 }
 static int cp_mmu_on(void)
@@ -327,10 +355,11 @@ static int zap_load(void)
     const uint8_t *code = gpu_firmware("a540_zap.b02",&code_size);
     struct lilac_a540_zap_layout layout;
     if (!lilac_a540_zap_layout(header,header_size,code_size,&layout) || !code || PAGE_SIZE < 16384) return 0;
-    vm_offset_t metadata = 0, image = 0;
-    if (kmem_alloc(kernel_map,&metadata,PAGE_SIZE,KMA_KOBJECT | KMA_ZERO | KMA_DATA,VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
-        kmem_alloc_contig(kernel_map,&image,layout.alignment,PAGE_MASK,0,(layout.alignment - 1) >> PAGE_SHIFT,
-            KMA_KOBJECT | KMA_ZERO | KMA_DATA,VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return 0;
+    if (zap_pending) return 0; /* prior secure ownership must have ended */
+    if (!zap_metadata && kmem_alloc(kernel_map,&zap_metadata,PAGE_SIZE,KMA_KOBJECT | KMA_ZERO | KMA_DATA,VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return 0;
+    if (!zap_image && kmem_alloc_contig(kernel_map,&zap_image,layout.alignment,PAGE_MASK,0,(layout.alignment - 1) >> PAGE_SHIFT,
+        KMA_KOBJECT | KMA_ZERO | KMA_DATA,VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return 0;
+    vm_offset_t metadata=zap_metadata, image=zap_image;
     uint64_t physical = kvtophys(image);
     if (physical & (layout.alignment - 1)) return 0;
     memcpy((void *)metadata,header,header_size);
@@ -353,7 +382,7 @@ static int zap_load(void)
 static int render_setup(void)
 {
     /* Linux v6.12 a5xx_hw_init, A540 1 MiB GMEM, Sony highest-bank-bit=15.
-     * Domains stay manually on. Autonomous collapse/DVFS remains disabled. */
+     * Domains are controlled by the host. Runtime collapse and clocks use the same serialized lifecycle. */
     const uint32_t setup[][2] = {
         {0xe96,2}, {0xe8b,0x100000}, {0xe8c,0}, {0xe8d,0x1fffff}, {0xe8e,0},
         {0xd00,(0x400u << 11) | (0x300u << 22)}, {0xf02,2u << 7}, {0xcc6,2u << 1}, {0xe8f,2},
@@ -377,8 +406,10 @@ static int render_setup(void)
 }
 static int fence_smoke(void)
 {
-    vm_offset_t commands;
-    if (!cp_buffer(0x0201c000,4096,NULL,&commands)) return 0;
+    if (!smoke_commands && !cp_buffer(0x0201c000,4096,NULL,&smoke_commands)) return 0;
+    vm_offset_t commands=smoke_commands;
+    *(volatile uint32_t *)(cp_fence+16)=0; *(volatile uint32_t *)(cp_fence+32)=0;
+    cache_flush(cp_fence,4096);
     /* Install before starting this IB and invalidate the context's TLB. */
     cache_flush(cp_tables,PAGE_SIZE);
     if (!write32(NULL,0x05048610,0) || !write32(NULL,0x050487f0,1)) return 0;
@@ -427,7 +458,6 @@ static int cp_stop(void)
 static int cp_smoke(uint32_t stage)
 {
     if (!cp_memory()) { printf("lilac A540 CP: missing firmware or allocation failed\n"); return 1; }
-    if (stage >= 7 && !user_memory()) return 1;
     for (unsigned i = 0; i < 2; i++) {
         if (!read32(NULL,cp_bus_address[i],&cp_bus_before[i])) return 1;
         cp_buses = i + 1;
@@ -481,10 +511,19 @@ static int cp_smoke(uint32_t stage)
     }
     if (stage >= 6 && !fence_smoke()) { cp_diagnostics("IB/fence failed"); return cp_stop(); }
     if (stage >= 7) {
-        *(volatile uint32_t *)(cp_fence+64) = 0;
+        *(volatile uint32_t *)(cp_fence+64) = gpu_sequence;
         cache_flush(cp_fence,4096);
+        /* Ring, microcode and smoke IB are read-only to unprivileged work.
+         * The completion page is privileged: only the kernel ring's APRIV
+         * bracket may write it. NO_UPDATE disables automatic RPTR writes. */
+        uint64_t *leaves=(void *)(cp_tables+8192);
+        for (unsigned i=0;i<512;i++) if (leaves[i]) leaves[i]|=0x80;
+        leaves[0x18]= (leaves[0x18]&~0xc0ull);
+        cache_flush(cp_tables,PAGE_SIZE);
+        gpu_awake=true;
+        if (!user_tlb_sync()) { gpu_failed=true; return cp_stop(); }
         gpu_kept = true;
-        printf("lilac A540: ready for Mesa, 1 MiB GMEM, fixed 19.2 MHz, single ring\n");
+        printf("lilac A540: ready for Mesa, 1 MiB GMEM, boot clock 19.2 MHz, single ring\n");
         return 1;
     }
     cp_diagnostics("completion");
@@ -522,7 +561,7 @@ int lilac_a540_probe(void)
     if (!PE_parse_boot_argn("lilac_a540", &stage, sizeof(stage)) || stage < 1 || stage > 7) return 1;
     probing = true;
     if (stage >= 2) smmu_writable();
-    const struct lilac_pm8005_io io = {NULL,read32,write32,wait_us};
+    const struct lilac_pm8005_io io = {NULL,read32,write32,wait_us,lilac_gpu_spmi_lock,lilac_gpu_spmi_unlock};
     struct lilac_pm8005 pm;
     int pm_ok = lilac_pm8005_snapshot(&io,&pm);
     printf("lilac A540 PM8005: readable=%u arb=%x channel=%u type=%x subtype=%x mv=%u mode=%x enable=%x status=%x transaction=%x\n",
@@ -604,6 +643,9 @@ void hakios_adreno_init(void)
 {
     if (gpu_kept && !gpu_service) {
         PE_parse_boot_argn("gpu_log",&gpu_log,sizeof(gpu_log));
+        PE_parse_boot_argn("lilac_gpu_pm",&gpu_pm_enabled,sizeof(gpu_pm_enabled));
+        PE_parse_boot_argn("lilac_gpu_clock",&gpu_clock_enabled,sizeof(gpu_clock_enabled));
+        gpu_activity=mach_absolute_time();
         gpu_service = true;
         HakiosGPUStart();
     }
@@ -615,7 +657,7 @@ bool hakios_gpu_parameter(uint32_t which, uint64_t *value)
     case 1: *value = 540; break;
     case 2: *value = 1024*1024; break;
     case 3: *value = 0x05040001; break;
-    case 4: *value = 19200000; break;
+    case 4: *value = gpu_clock_enabled ? 257000000 : 19200000; break;
     case 5: *value = mach_absolute_time(); break;
     case 6: *value = 0x100000; break;
     case 7: *value = 1; break;
@@ -625,19 +667,74 @@ bool hakios_gpu_parameter(uint32_t which, uint64_t *value)
     }
     return true;
 }
-uint64_t hakios_gpu_address(uint64_t size)
+/* Every IOUserClient owns a root, L2, leaves and allocator. CB0 is switched
+ * only after the previous ring and GPU are idle; secure contexts are unused. */
+static int context_switch(struct lilac_gpu_context *ctx)
 {
-    return gpu_kept && !gpu_failed ? lilac_gpu_va_alloc(&gpu_va,size) : 0;
+    if (ctx==active_context) return 1;
+    if (!gpu_awake) { active_context=NULL; return 1; }
+    if (!cp_send()) return 0;
+    uint64_t root=kvtophys(ctx ? ctx->tables : cp_tables);
+    vm_offset_t ttbr=address_of(0x05048020);
+    if (!ttbr || !lilac_a540_store64(ttbr,root) || !user_tlb_sync() || !gpu_write(0xe95,0x12)) return 0;
+    active_context=ctx;
+    if (context_switches++<16 || gpu_log) printf("lilac A540 context: selected=%u TTBR=%llx\n",ctx?ctx->id:0,root);
+    return 1;
 }
-void hakios_gpu_address_free(uint64_t address, uint64_t size)
+struct lilac_gpu_context *lilac_gpu_context_create(void)
 {
-    if (!lilac_gpu_va_free(&gpu_va,address,size)) printf("lilac A540: invalid VA free %llx/%llx\n",address,size);
+    if (!gpu_kept || gpu_failed || context_count>=16) return NULL;
+    vm_offset_t memory=0;
+    if (kmem_alloc(kernel_map,&memory,round_page(sizeof(struct lilac_gpu_context)),KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return NULL;
+    struct lilac_gpu_context *ctx=(void *)memory;
+    if (kmem_alloc(kernel_map,&ctx->tables,PAGE_SIZE,KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS ||
+        kmem_alloc(kernel_map,&ctx->leaves,480*4096,KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
+        if (ctx->tables) kmem_free(kernel_map,ctx->tables,PAGE_SIZE);
+        kmem_free(kernel_map,memory,round_page(sizeof(*ctx))); return NULL;
+    }
+    uint64_t *root=(void *)ctx->tables, *middle=(void *)(ctx->tables+4096);
+    root[0]=kvtophys(ctx->tables+4096)|3;
+    middle[16]=kvtophys(cp_tables+8192)|3;
+    for (unsigned i=32;i<512;i++) middle[i]=kvtophys(ctx->leaves+(i-32)*4096)|3;
+    cache_flush(ctx->tables,PAGE_SIZE); cache_flush(ctx->leaves,480*4096);
+    ctx->id=++context_serial; context_count++;
+    printf("lilac A540 context: created=%u root=%llx\n",ctx->id,kvtophys(ctx->tables));
+    return ctx;
 }
-bool hakios_gpu_map(uint64_t address, uint64_t phys, bool read_only)
+bool lilac_gpu_context_retire(struct lilac_gpu_context *ctx)
 {
-    if (!gpu_kept || gpu_failed || !phys || ((address | phys) & 4095) || phys >= (1ull << 40) ||
-        !lilac_gpu_va_contains(&gpu_va,address,4096)) return false;
-    uint64_t *entry = (uint64_t *)user_tables+(address-LILAC_GPU_VA_START)/4096;
+    /* A malicious IB need not list all referenced BOs. Close/unmap must
+     * drain the entire current context while retaining the service lock. */
+    if (gpu_failed || power_uncertain) return false;
+    if (!gpu_awake || ctx!=active_context) return true;
+    if (lilac_gpu_poll_fault()) return !gpu_failed;
+    if (cp_send()) return true;
+    hakios_gpu_report("retiring context did not idle");
+    return !gpu_failed;
+}
+void lilac_gpu_context_destroy(struct lilac_gpu_context *ctx)
+{
+    if (!ctx) return;
+    /* Failed DMA/TLB state pins this context until reboot. */
+    if (!lilac_gpu_context_retire(ctx) || (active_context==ctx && !context_switch(NULL))) return;
+    kmem_free(kernel_map,ctx->leaves,480*4096); kmem_free(kernel_map,ctx->tables,PAGE_SIZE);
+    printf("lilac A540 context: destroyed=%u\n",ctx->id);
+    kmem_free(kernel_map,(vm_offset_t)ctx,round_page(sizeof(*ctx))); context_count--;
+}
+uint64_t lilac_gpu_context_address(struct lilac_gpu_context *ctx, uint64_t size)
+{
+    return ctx && gpu_kept && !gpu_failed ? lilac_gpu_va_alloc(&ctx->va,size) : 0;
+}
+void lilac_gpu_context_address_free(struct lilac_gpu_context *ctx, uint64_t address, uint64_t size)
+{
+    if (!ctx || !lilac_gpu_va_free(&ctx->va,address,size)) printf("lilac A540: invalid VA free %llx/%llx\n",address,size);
+}
+bool lilac_gpu_context_map(struct lilac_gpu_context *ctx, uint64_t address, uint64_t phys, bool read_only)
+{
+    if (!ctx || !gpu_kept || gpu_failed || !phys || ((address | phys) & 4095) || phys >= (1ull << 40) ||
+        !lilac_gpu_va_contains(&ctx->va,address,4096)) return false;
+    if (ctx==active_context && !hakios_gpu_done(ctx->last) && !cp_send()) { gpu_failed=true; return false; }
+    uint64_t *entry = (uint64_t *)ctx->leaves+(address-LILAC_GPU_VA_START)/4096;
     if (*entry) return false;
     *entry = phys | 0xe43ull | (read_only ? 0x80 : 0);
     cache_flush((vm_offset_t)entry,8);
@@ -645,6 +742,7 @@ bool hakios_gpu_map(uint64_t address, uint64_t phys, bool read_only)
 }
 static int user_tlb_sync(void)
 {
+    if (!gpu_awake) return 1; /* resume invalidates before any DMA */
     if (!write32(NULL,0x05048610,0) || !write32(NULL,0x050487f0,1)) return 0;
     for (unsigned i = 0; i < 1000; i++) {
         uint32_t status;
@@ -658,10 +756,10 @@ void hakios_gpu_mapped(void)
 {
     if (!user_tlb_sync()) { gpu_failed = true; printf("lilac A540: TLB sync failed; submissions disabled\n"); }
 }
-void hakios_gpu_unmap(uint64_t address, uint64_t size)
+void lilac_gpu_context_unmap(struct lilac_gpu_context *ctx, uint64_t address, uint64_t size)
 {
-    if ((address | size) & 4095 || !lilac_gpu_va_contains(&gpu_va,address,size)) return;
-    uint64_t *entry = (uint64_t *)user_tables+(address-LILAC_GPU_VA_START)/4096;
+    if (!ctx || (address | size) & 4095 || !lilac_gpu_va_contains(&ctx->va,address,size)) return;
+    uint64_t *entry = (uint64_t *)ctx->leaves+(address-LILAC_GPU_VA_START)/4096;
     bzero(entry,(size/4096)*8);
     cache_flush((vm_offset_t)entry,(size/4096)*8);
     hakios_gpu_mapped();
@@ -680,21 +778,29 @@ void hakios_gpu_worked(uint64_t *us, uint32_t *submissions, uint32_t by[7])
     /* Do not label CPU wait time as hardware execution time. */
     *us = 0; *submissions = 0; bzero(by,7*sizeof(*by));
 }
-uint32_t hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+uint32_t lilac_gpu_context_submit(struct lilac_gpu_context *ctx, const uint64_t *addresses, const uint32_t *words, uint32_t count)
 {
-    if (!gpu_kept || gpu_failed || !addresses || !words || !count || count > LILAC_A5XX_SUBMIT_MAX) return 0;
+    if (!ctx || ctx->failed || !gpu_kept || gpu_failed || !addresses || !words || !count || count > LILAC_A5XX_SUBMIT_MAX) return 0;
+    if (!lilac_a540_resume()) return 0;
+    if (!context_switch(ctx)) { gpu_failed=true; return 0; }
+    gpu_activity=mach_absolute_time();
+    if (gpu_clock_enabled && gpu_clock.hz!=257000000 && hakios_gpu_done(gpu_sequence)) {
+        const struct lilac_a540_power_io io={NULL,clock_read,clock_write,wait_us};
+        if (!cp_send() || !lilac_a540_clock_set(&io,&gpu_clock,257000000)) { gpu_failed=true; return 0; }
+        printf("lilac A540 clock: active=%u Hz\n",gpu_clock.hz);
+    }
     struct lilac_a5xx_ib ibs[LILAC_A5XX_SUBMIT_MAX];
     for (uint32_t i = 0; i < count; i++) {
-        if (!words[i] || (addresses[i] & 3) || !lilac_gpu_va_contains(&gpu_va,addresses[i],(uint64_t)words[i]*4)) return 0;
+        if (!words[i] || (addresses[i] & 3) || !lilac_gpu_va_contains(&ctx->va,addresses[i],(uint64_t)words[i]*4)) return 0;
         ibs[i] = (struct lilac_a5xx_ib){addresses[i],words[i]};
     }
     uint32_t read = 0, next = gpu_sequence+1;
     if (!next) next = 1;
     for (unsigned i = 0; i < 20000; i++) {
         if (!gpu_read(0x806,&read)) return 0;
-        if (lilac_a5xx_submit(&cp_commands,read,ibs,count,0x02018040,next)) {
+        if (lilac_a5xx_submit_mode(&cp_commands,read,ibs,count,0x02018040,next,1)) {
             cache_flush(cp_ring,32768);
-            gpu_sequence = next;
+            gpu_sequence = next; ctx->last=next;
             /* Once publication is attempted, this sequence owns its buffers
              * even on failure. An unsignaled fence pins them in the service. */
             if (!gpu_write(0x807,(uint32_t)cp_commands.write_index)) { gpu_failed = true; return next; }
@@ -715,11 +821,37 @@ void hakios_gpu_report(const char *why)
         uint32_t value = 0;
         gpu_read(regs[i],&value); printf("lilac A540 IB: reg[%x]=%x\n",regs[i],value);
     }
+    if (active_context && fault_count<16) {
+        struct lilac_gpu_context *bad=active_context;
+        bad->failed=true;
+        cache_flush(cp_fence+64,4);
+        uint32_t completed=*(volatile uint32_t *)(cp_fence+64);
+        if (!gpu_power_down()) return;
+        failed_fences[fault_count].first=completed==gpu_sequence ? completed : completed+1;
+        failed_fences[fault_count++].last=gpu_sequence;
+        /* DMA is stopped. Canceled work can now release its buffers, while
+         * wait/status reports failure and healthy clients may resume. */
+        *(volatile uint32_t *)(cp_fence+64)=gpu_sequence;
+        cache_flush(cp_fence+64,4);
+        gpu_failed=false;
+        printf("lilac A540 isolation: quarantined context=%u canceled_through=%u reset confirmed\n",bad->id,gpu_sequence);
+    }
+}
+bool lilac_gpu_poll_fault(void)
+{
+    if (!gpu_awake || gpu_failed || !active_context) return false;
+    uint32_t fsr=0, fault=0, protect=0;
+    if (!read32(NULL,0x05048058,&fsr) || !gpu_read(0xb1a,&fault) || !gpu_read(0xb1c,&protect) ||
+        (fsr&0xc00001feu) || fault || protect) {
+        hakios_gpu_report("context hardware fault");
+        return true;
+    }
+    return false;
 }
 void hakios_adreno_minute(void) {}
 void hakios_adreno_quiesce(void)
 {
-    if (!gpu_kept) return;
+    if (!gpu_awake) return;
     gpu_failed = true;
     /* Panic path: no service lock, allocation, PAS call or power release. */
     gpu_write(0x38,0); gpu_write(0x3080,15);
@@ -729,10 +861,9 @@ void hakios_adreno_quiesce(void)
         wait_us(NULL,10);
     }
 }
-void hakios_gpu_stop(void)
+static bool gpu_power_down(void)
 {
-    if (!gpu_kept) return;
-    gpu_failed = true;
+    if (!gpu_awake) return !power_uncertain;
     for (unsigned i = 0; i < 5000 && !hakios_gpu_done(gpu_sequence); i++) wait_us(NULL,100);
     /* A completed fence can precede the busy hysteresis becoming idle. Let
      * it settle before recording the final state; don't read CP here. */
@@ -745,18 +876,64 @@ void hakios_gpu_stop(void)
     uint32_t interrupt = 0, fault = 0, protect = 0;
     gpu_read(0xb18,&interrupt); gpu_read(0xb1a,&fault); gpu_read(0xb1c,&protect);
     printf("lilac A540 render faults: CP interrupt=%x hardware=%x protection=%x\n",interrupt,fault,protect);
-    if (!cp_stop()) { printf("lilac A540 stop: halt unconfirmed; retaining all resources\n"); return; }
-    gpu_kept = false;
+    if (!cp_stop()) { printf("lilac A540 stop: halt unconfirmed; retaining all resources\n"); power_uncertain=true; return false; }
     const struct lilac_a540_power_io power_io = {NULL,clock_read,clock_write,wait_us};
-    const struct lilac_pm8005_io io = {NULL,read32,write32,wait_us};
-    if (!lilac_a540_power_release(&power_io,&retained_power)) {
-        printf("lilac A540 stop: GX collapse unconfirmed; retaining MX/CX\n"); return;
+    const struct lilac_pm8005_io io = {NULL,read32,write32,wait_us,lilac_gpu_spmi_lock,lilac_gpu_spmi_unlock};
+    if (!lilac_a540_clock_restore(&power_io,&gpu_clock) || !lilac_a540_power_release(&power_io,&retained_power)) {
+        printf("lilac A540 stop: GX collapse unconfirmed; retaining MX/CX\n"); power_uncertain=true; return false;
     }
+    gpu_awake=false; active_context=NULL;
     uint32_t actual = 0;
     int memory_restored = write32(NULL,0x01fcf004,retained_memacc) && read32(NULL,0x01fcf004,&actual) && actual == retained_memacc;
     int mmu = cp_cleanup(), pm = lilac_pm8005_restore(&io,&retained_pm), mx = lilac_rpm_gpu_vote(0);
     int cx = lilac_a540_cx_release();
     printf("lilac A540 stop: sequence=%u completed=%u MMU=%u memory=%u PM8005=%u MX=%u CX=%u\n",
         gpu_sequence,*(volatile uint32_t *)(cp_fence+64),mmu,memory_restored,pm,mx,cx);
+    power_uncertain=!(mmu && memory_restored && pm && mx && cx);
+    return !power_uncertain;
+}
+bool lilac_a540_suspend(void)
+{
+    if (!gpu_kept || gpu_failed) return false;
+    if (!hakios_gpu_done(gpu_sequence)) return false;
+    if (!gpu_power_down()) { gpu_failed=true; return false; }
+    printf("lilac A540 PM: suspended sequence=%u resources retained\n",gpu_sequence);
+    return true;
+}
+bool lilac_a540_resume(void)
+{
+    if (!gpu_kept || gpu_failed || power_uncertain) return false;
+    if (gpu_awake) return true;
+    gpu_kept=false;
+    if (!lilac_a540_cx_acquire()) { gpu_failed=true; gpu_kept=true; return false; }
+    int release=lilac_a540_probe();
+    if (release || !gpu_awake) { gpu_failed=true; gpu_kept=true; return false; }
+    gpu_activity=mach_absolute_time();
+    printf("lilac A540 PM: resumed sequence=%u reused firmware and tables\n",gpu_sequence);
+    return true;
+}
+void lilac_a540_tick(void)
+{
+    if (!gpu_kept || gpu_failed || !gpu_awake || !hakios_gpu_done(gpu_sequence)) return;
+    /* Idle time starts when the last queued work is observed complete,
+     * not when a potentially long-running submission was enqueued. */
+    if (gpu_idle_sequence!=gpu_sequence) {
+        gpu_idle_sequence=gpu_sequence;
+        gpu_activity=mach_absolute_time();
+        return;
+    }
+    uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time()-gpu_activity,&ns);
+    if (gpu_pm_enabled && ns>=500*NSEC_PER_MSEC) { lilac_a540_suspend(); return; }
+    if (gpu_clock_enabled && ns>=50*NSEC_PER_MSEC && gpu_clock.hz!=180000000) {
+        const struct lilac_a540_power_io io={NULL,clock_read,clock_write,wait_us};
+        if (!cp_send() || !lilac_a540_clock_set(&io,&gpu_clock,180000000)) { gpu_failed=true; return; }
+        printf("lilac A540 clock: idle=%u Hz\n",gpu_clock.hz);
+    }
+}
+void hakios_gpu_stop(void)
+{
+    if (!gpu_kept) return;
+    gpu_failed=true;
+    if (gpu_power_down()) gpu_kept=false;
 }
 void hakios_adreno_stop(void) { if (gpu_kept && gpu_service) HakiosGPUStop(); }

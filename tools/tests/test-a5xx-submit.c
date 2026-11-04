@@ -31,5 +31,17 @@ int main(void)
     struct lilac_a5xx_ib invalid = {LILAC_A5XX_VA_LIMIT - 4, 2};
     assert(!lilac_a5xx_submit(&ring, 0, &invalid, 1, 0x1000, 9));
     assert(ring.write_index == 0 && !memcmp(memory, before, sizeof(memory)));
+    for (size_t w=0;w<32;w++) for (size_t r=0;r<32;r++) {
+        for (unsigned i=0;i<32;i++) memory[i]=before[i]=0xfeed0000+i;
+        ring=(struct lilac_a5xx_ring){memory,32,w};
+        int enough=((r-w-1)&31)>=29;
+        assert(lilac_a5xx_submit_mode(&ring,r,ibs,2,0x1000,9,1)==enough);
+        if (!enough) { assert(ring.write_index==w && !memcmp(memory,before,sizeof(memory))); continue; }
+        /* No privilege around either IB. The tail restores APRIV=0 and
+         * protected mode before another client's commands can follow. */
+        assert(memory[(w+1)&31]==ibs[0].address && memory[(w+5)&31]==(uint32_t)ibs[1].address);
+        assert(memory[(w+26)&31]==0 && memory[(w+28)&31]==1);
+        assert(ring.write_index==((w+29)&31));
+    }
     puts("PASS: A5xx indirect submissions, fence packets, ring wraps and atomic rejection");
 }

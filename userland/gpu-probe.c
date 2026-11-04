@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
+#include "gpu-isolation-probe.h"
+#include "smp-probe.h"
 extern void *OSMesaCreateContextAttribs(const int *, void *);
 extern unsigned char OSMesaMakeCurrent(void *, void *, unsigned, int, int);
 extern void OSMesaDestroyContext(void *);
@@ -52,6 +55,10 @@ int main(void)
 {
     setvbuf(stdout,NULL,_IONBF,0);
     unsetenv("OSMESA_SOFTWARE"); unsetenv("GALLIUM_DRIVER");
+    if (!smp_probe()) { report(0,"SMP execution and pmap stress"); return 1; }
+    if (!isolation_probe()) { report(0,"process address-space isolation"); return 1; }
+    if (!isolation_protection()) { report(0,"GPU protection and recovery"); return 1; }
+    if (!resume_allocation_probe()) { report(0,"concurrent allocation during GPU resume"); return 1; }
     puts("A540 HARDWARE RENDER: BEGIN shader and texture acceptance");
     const int attrs[] = {0x22,0x1908,0x30,24,0x31,8,0x33,0x38,0x36,2,0x37,0,0};
     uint8_t storage[64*64*4] = {0}, pixels[sizeof(storage)];
@@ -70,6 +77,7 @@ int main(void)
     glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,0,NULL);
     const uint8_t colors[][4] = {{255,0,0,255},{0,255,0,255},{255,255,0,255}}, blue[] = {0,0,255,255};
     for (unsigned pass = 0; pass < 3; pass++) {
+        usleep(800000); /* Same GL objects must survive runtime idle collapse. */
         glClearColor(0,0,1,1); glClear(GL_COLOR_BUFFER_BIT);
         glUniform4f(glGetUniformLocation(p,"color"),colors[pass][0]/255.f,colors[pass][1]/255.f,0,1);
         glDrawArrays(GL_TRIANGLES,0,3); glFinish();
