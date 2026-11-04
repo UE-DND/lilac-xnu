@@ -19,6 +19,7 @@ static int system_prepare(void) {
     system_mount_ok=1;
     if (mount("devfs","/ios/dev",0,NULL)) printf("UFS devfs mount errno=%d (inherited console remains open)\n",errno);
 #ifdef LILAC_FAST_BOOT
+    fast_boot_checkpoint("system-mounted");
     return 1; /* image registration, GPT and first/last block checks remain mandatory */
 #endif
     puts("UFS APFS MOUNT: PASS; full original system + unsplit cache on storage");

@@ -2,6 +2,29 @@
  * Uses HakiOS libmini; never opens a disk device or writes to the root filesystem.
  */
 #include "mini.h"
+#if defined(LILAC_FAST_BOOT) && defined(LILAC_SYSTEM_PROBE)
+/* Preserve stage timing and storage counters in the returned console log. */
+static void fast_boot_checkpoint(const char *stage)
+{
+	struct timeval now, boot;
+	size_t length = sizeof(boot);
+	if (gettimeofday(&now, NULL) == 0 &&
+	    sysctlbyname("kern.boottime", &boot, &length, NULL, 0) == 0 &&
+	    length == sizeof(boot) && now.tv_sec >= boot.tv_sec) {
+		long ms = (now.tv_sec - boot.tv_sec) * 1000 +
+		    (now.tv_usec - boot.tv_usec) / 1000;
+		printf("FAST BOOT %s uptime_ms=%ld\n", stage, ms);
+	} else {
+		printf("FAST BOOT %s uptime unavailable\n", stage);
+	}
+	char status[512];
+	length = sizeof(status) - 1;
+	if (sysctlbyname("kern.lilac_ufs_status", status, &length, NULL, 0) == 0 && length < sizeof(status)) {
+		status[length] = '\0';
+		printf("FAST BOOT %s UFS %s\n", stage, status);
+	}
+}
+#endif
 #ifdef LILAC_UFS_PROBE
 #include "ufs-probe.h"
 #endif
@@ -141,6 +164,7 @@ main(int argc, char **argv, char **envp)
 	}
 	if (fd > 2) close(fd);
 #ifdef LILAC_FAST_BOOT
+	fast_boot_checkpoint("pid1");
 	if (system_prepare()) mobile_test(1);
 	else puts("FAST BOOT: system image registration or mount failed; PID1 remains resident");
 	for (;;) { usleep(1000000); }

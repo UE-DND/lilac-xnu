@@ -46,15 +46,23 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 
-#include "hakios.gl.h"
 #include "hakios.input.h"
 
+#ifndef LILAC_INPUT_ONLY
+#include "hakios.gl.h"
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
 #define CACHE_BASE 0x180000000UL                /* where the cache was built to be, before the slide */
+#ifndef HAKIOS_GL
 #define HAKIOS_GL "/redwood/lib/libhakios.gl.dylib"
+#endif
 
 static uintptr_t slide;
+#endif
+
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+static int lilac_input_console = -1;
+#endif
 
 static void
 say(const char *format, ...)
@@ -69,9 +77,14 @@ say(const char *format, ...)
 	if (n > (int)sizeof(line) - 1) {
 		n = sizeof(line) - 1;
 	}
-	write(2, line, (size_t)n);
+	int descriptor = 2;
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+	if (lilac_input_console >= 0) descriptor = lilac_input_console;
+#endif
+	if (n > 0) write(descriptor, line, (size_t)n);
 }
 
+#ifndef LILAC_INPUT_ONLY
 /* Replace one entry of a virtual table (unslid address `slot`) that must now hold `expected`. */
 static void *
 replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *replacement)
@@ -553,8 +566,10 @@ window_server_fixes(void)
  * starts, a moment later; one that turns up afterwards it does not notice. (For as long as
  * the five seconds were waited here, ours was always in time by accident.)
  */
+#endif
 static dispatch_semaphore_t input_services_made;
 
+#ifndef LILAC_INPUT_ONLY
 static void
 wait_for_als_arrival(__unused id self, __unused SEL selector)
 {
@@ -579,6 +594,7 @@ brightness_fixes(void)
 	method_setImplementation(method, (IMP)wait_for_als_arrival);
 }
 
+#endif
 /* ---- backboardd: the touch screen and the buttons ---------------------------------------------- */
 
 /* IOKit's HID event system, the part that has no public header on Darwin (prototypes checked against 20F66) */
@@ -844,7 +860,16 @@ send_touch(IOHIDServiceClientRef screen, const struct hakios_touch *t)
 		IOHIDEventAppendEvent(hand, finger, 0);
 		CFRelease(finger);
 	}
+#if defined(LILAC_INPUT_ONLY) || defined(LILAC_GPU_INPUT)
+	static unsigned accepted, rejected;
+	Boolean dispatched = IOHIDVirtualServiceClientDispatchEvent(screen, hand);
+	if (dispatched) accepted++; else rejected++;
+	if (lilac_input_console >= 0 && (t->type != HAKIOS_TOUCH_MOVE || !dispatched || accepted % 128 == 0))
+		say("lilac input: HID type=%u slot=%u xy=%u,%u accepted=%u rejected=%u mode=%x\n",
+		    t->type, t->finger, t->x, t->y, accepted, rejected, touch_mode);
+#else
 	IOHIDVirtualServiceClientDispatchEvent(screen, hand);
+#endif
 	CFRelease(hand);
 }
 
@@ -995,6 +1020,7 @@ input_start(void)
 	}
 }
 
+#ifndef LILAC_INPUT_ONLY
 /* ---- containermanagerd ---------------------------------------------------------------------------- */
 
 static BOOL
@@ -1077,6 +1103,28 @@ opengl_es(void)
 	gl_function_refused = (void (*)(unsigned))dlsym(library, "hakios_gl_function_refused");
 }
 
+#ifdef LILAC_GPU_INPUT
+/* Lilac keeps its input bridge and only opts in to GL after the kernel has
+ * published a usable GPU service. Avoid unrelated redwood-specific patches. */
+__attribute__((constructor))
+static void lilac_gpu_input_init(void)
+{
+	const char *name = getprogname();
+	if (name == NULL || strcmp(name, "backboardd") != 0) return;
+	const char *debug = getenv("LILAC_TOUCH_DEBUG");
+	if (debug != NULL && strcmp(debug, "1") == 0)
+		lilac_input_console = open("/dev/console", O_WRONLY | O_NOCTTY);
+	size_t length = 0;
+	const void *cache = _dyld_get_shared_cache_range(&length);
+	if (cache != NULL) {
+		slide = (uintptr_t)cache - CACHE_BASE;
+		opengl_es();
+	} else {
+		say("lilac: shared cache unavailable; keeping software renderer\n");
+	}
+	input_start();
+}
+#else
 __attribute__((constructor))
 static void
 hakios_init(void)
@@ -1145,3 +1193,18 @@ hakios_init(void)
 		container_manager_fixes();
 	}
 }
+#endif
+#else
+__attribute__((constructor))
+static void lilac_input_init(void)
+{
+	const char *name = getprogname();
+	if (name != NULL && strcmp(name, "backboardd") == 0) {
+		const char *debug = getenv("LILAC_TOUCH_DEBUG");
+		if (debug != NULL && strcmp(debug, "1") == 0)
+			lilac_input_console = open("/dev/console", O_WRONLY | O_NOCTTY);
+		say("lilac input: starting S3330 HID bridge\n");
+		input_start();
+	}
+}
+#endif

@@ -131,6 +131,61 @@ def validate_smp_dt(dtb):
     return sorted(seen)
 
 
+def validate_usb_debug_dt(dtb):
+    spec = importlib.util.spec_from_file_location('usb_soc', HAKIOS / 'tools/soc-args.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    validate_usb_debug_nodes(module.nodes_of(dtb))
+
+
+def validate_usb_debug_nodes(nodes):
+    expected = {
+        ('', '#address-cells'): struct.pack('>I', 2),
+        ('/soc', '#address-cells'): struct.pack('>I', 1),
+        ('/soc', '#size-cells'): struct.pack('>I', 1),
+        ('/soc', 'ranges'): struct.pack('>4I', 0, 0, 0, 0xffffffff),
+        ('/psci', 'method'): b'smc\0',
+        ('/soc/ssusb@a800000', 'reg'): struct.pack('>4I', 0xa800000, 0xf8c00, 0xc016000, 0x400),
+        ('/soc/ssusb@a800000', 'ranges'): b'',
+        ('/soc/ssusb@a800000', '#address-cells'): struct.pack('>I', 1),
+        ('/soc/ssusb@a800000', '#size-cells'): struct.pack('>I', 1),
+        ('/soc/ssusb@a800000/dwc3@a800000', 'compatible'): b'snps,dwc3\0',
+        ('/soc/ssusb@a800000/dwc3@a800000', 'reg'): struct.pack('>2I', 0xa800000, 0xcd00),
+        ('/soc/ssusb@a800000/dwc3@a800000', 'maximum-speed'): b'high-speed\0',
+        ('/soc/qusb@c012000', 'reg'): struct.pack('>6I', 0xc012000, 0x2a8, 0x1fcb24c, 4, 0x784238, 4),
+        ('/soc/qcom,msm-imem@146bf000', '#address-cells'): struct.pack('>I', 1),
+        ('/soc/qcom,msm-imem@146bf000', '#size-cells'): struct.pack('>I', 1),
+        ('/soc/qcom,msm-imem@146bf000', 'ranges'): struct.pack('>3I', 0, 0x146bf000, 0x1000),
+        ('/soc/qcom,msm-imem@146bf000/restart_reason@65c', 'reg'): struct.pack('>2I', 0x65c, 4),
+        ('/soc/restart@10ac000', 'reg'): struct.pack('>4I', 0x10ac000, 4, 0x1fd3000, 4),
+        ('/soc/restart@10ac000', 'compatible'): b'qcom,pshold\0',
+        ('/soc/qcom,spmi@800f000', 'compatible'): b'qcom,spmi-pmic-arb\0',
+        ('/soc/qcom,spmi@800f000', 'reg'): struct.pack('>10I', 0x800f000, 0x1000, 0x8400000, 0x1000000,
+                                                    0x9400000, 0x1000000, 0xa400000, 0x220000, 0x800a000, 0x3000),
+        ('/soc/qcom,spmi@800f000', 'reg-names'): b'core\0chnls\0obsrvr\0intr\0cnfg\0',
+        ('/soc/qcom,spmi@800f000', 'qcom,ee'): struct.pack('>I', 0),
+        ('/soc/qcom,spmi@800f000', 'qcom,reserved-chan'): struct.pack('>I', 511),
+        ('/soc/qcom,spmi@800f000/qcom,pm8998@0', 'reg'): struct.pack('>2I', 0, 0),
+        ('/soc/qcom,spmi@800f000/qcom,pm8998@0/qcom,power-on@800', 'reg'): struct.pack('>2I', 0x800, 0x100),
+        ('/soc/qcom,spmi@800f000/qcom,pm8998@0/qcom,power-on@800', 'compatible'): b'qcom,qpnp-power-on\0',
+        ('/soc/qcom,spmi@800f000/qcom,pm8998@0/qcom,power-on@800', 'qcom,system-reset'): b'',
+        ('/soc/qcom,spmi@800f000/qcom,pm8998@0/qcom,power-on@800', 'qcom,store-hard-reset-reason'): b'',
+    }
+    for (node, key), value in expected.items():
+        if nodes.get(node, {}).get(key) != value:
+            raise ValueError(f'USB debug requires verified Lilac DTB: {node}/{key}')
+    for node in {node for node, key in expected}:
+        if nodes[node].get('status', b'okay\0') not in (b'ok\0', b'okay\0'):
+            raise ValueError('USB debug refuses disabled node: ' + node)
+    for node, properties in nodes.items():
+        if b'qcom,qpnp-power-on' not in properties.get('compatible', b'').split(b'\0'):
+            continue
+        if any(key in properties for key in ('qcom,secondary-pon-reset', 'qcom,warm-reset-poweroff-type')):
+            raise ValueError('USB debug refuses unhandled PON reset override: ' + node)
+        if 'qcom,system-reset' in properties and node != '/soc/qcom,spmi@800f000/qcom,pm8998@0/qcom,power-on@800':
+            raise ValueError('USB debug refuses additional system-reset PMIC: ' + node)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True, help='new output directory')
@@ -140,6 +195,8 @@ def main():
     p.add_argument('--extra-boot-args', default='', help='append diagnostic kernel arguments for RAMDisk boot')
     p.add_argument('--quiet-boot',action='store_true',help='suppress normal loader text and kernel trace/verbose boot')
     p.add_argument('--smp',action='store_true',help='offer PSCI-off cores from the validated Sony CPU topology')
+    p.add_argument('--usb-debug', action='store_true', help='serve captured logs over USB after XNU returns; RAM only')
+    p.add_argument('--usb-self-test', action='store_true', help='test USB log retrieval without starting XNU')
     diagnostics = p.add_mutually_exclusive_group()
     diagnostics.add_argument('--ufs-snapshot', action='store_true',
                    help='read only UFS status registers and halt in BootShim; does not enter XNU')
@@ -154,12 +211,17 @@ def main():
         p.error('--extra-boot-args must contain printable ASCII only')
     if a.ramdisk_format == 'apfs' and a.ramdisk is None:
         p.error('--ramdisk-format apfs requires --ramdisk')
+    a.usb_debug = a.usb_debug or a.usb_self_test
+    if a.usb_debug and (a.smp or a.ufs_snapshot or a.ufs_read_probe or a.ufs_handoff_snapshot):
+        p.error('USB debug currently requires single-core, non-UFS-diagnostic RAM boot')
     kernel, dtb = a.kernel.read_bytes(), a.dtb.read_bytes()
     km = macho(kernel, True)
     if len(dtb) < 40 or struct.unpack_from('>I', dtb)[0] != 0xD00DFEED:
         raise ValueError("invalid Sony DTB")
     if a.smp:
         validate_smp_dt(dtb)
+    if a.usb_debug:
+        validate_usb_debug_dt(dtb)
     ufs_diagnostic = ufs_snapshot_dt(dtb) if a.ufs_snapshot or a.ufs_read_probe or a.ufs_handoff_snapshot else None
     if a.ufs_read_probe:
         ufs_diagnostic.update(mode='LUN 0 capacity, MBR, primary/repeated/backup GPT headers and full arrays, repeated partition boundaries; halt before XNU',
@@ -197,6 +259,17 @@ def main():
     flags = ['--target=aarch64-none-elf', '-march=armv8-a', '-ffreestanding', '-fno-builtin',
              '-fno-stack-protector', '-mstrict-align', '-mgeneral-regs-only', '-O2', '-Wall', '-Wextra']
     flags += ['-DLILAC_EXTRA_BOOT_ARGS=' + json.dumps(a.extra_boot_args)]
+    usb_debug = None
+    if a.usb_debug:
+        debug_sources = [ROOT / 'bootloader' / name for name in
+                         ('debug-usb.c', 'debug-usb.h', 'debug-protocol.h', 'debug-reboot.h', 'shim-entry.S', 'shim-main.c')]
+        run_id = hashlib.sha256(kernel + ramdisk + dtb + a.extra_boot_args.encode() +
+                                bytes([a.usb_self_test]) + b''.join(path.read_bytes() for path in debug_sources)).hexdigest()[:32]
+        flags += ['-DLILAC_USB_DEBUG=1', '-DLILAC_DEBUG_RUN_ID=' + json.dumps(run_id)]
+        if a.usb_self_test:
+            flags.append('-DLILAC_USB_SELF_TEST=1')
+        usb_debug = {'run_id': run_id, 'serial': 'lilac-debug', 'self_test': a.usb_self_test,
+                     'mode': 'post-return log upload; no live XNU USB console', 'storage_writes': False}
     if a.quiet_boot:
         flags.append('-DLILAC_QUIET_BOOT=1')
     if a.smp:
@@ -208,6 +281,8 @@ def main():
     if a.ufs_handoff_snapshot:
         flags.append('-DLILAC_UFS_HANDOFF=1')
     source_names = ['shim-entry.S', 'shim-main.c', 'font_8x16.c']
+    if a.usb_debug:
+        source_names.append('debug-usb.c')
     if a.ufs_read_probe:
         source_names.append('ufs-read.c')
     if a.ufs_handoff_snapshot:
@@ -255,6 +330,9 @@ def main():
               *[ROOT / 'bootloader' / n for n in ('shim-main.c', 'shim-entry.S', 'shim.ld', 'boot_args.h', 'font_8x16.c', 'font_8x16.h')]]
     if a.smp:
         inputs.append(ROOT/'bootloader/smp-topology.h')
+    if a.usb_debug:
+        inputs.extend(debug_sources)
+        inputs.append(HAKIOS / 'tools/soc-args.py')
     if a.ufs_snapshot or a.ufs_read_probe or a.ufs_handoff_snapshot or a.smp:
         inputs.append(HAKIOS / 'tools/soc-args.py')
     if a.ufs_read_probe:
@@ -269,6 +347,7 @@ def main():
                 'image_bytes': len(image), 'compile_flags': flags, 'hello_origin': hello_origin,
                 'extra_boot_args': a.extra_boot_args,
                 'quiet_boot': a.quiet_boot,
+                'usb_debug': usb_debug,
                 'smp':a.smp,
                 'ufs_snapshot': ufs_diagnostic,
                 'inputs': {str(f.resolve()): hashlib.sha256(f.read_bytes()).hexdigest() for f in inputs}}

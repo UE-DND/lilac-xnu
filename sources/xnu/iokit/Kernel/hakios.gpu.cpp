@@ -1,3 +1,4 @@
+#if defined(HAKIOS_ADRENO) || defined(HAKIOS_A540)
 /*
  * HakiosGPU: the phone's Adreno for programs to draw with.
  *
@@ -324,6 +325,10 @@ HakiosGPUStart(void)
 
 	gGPUCached = PE_parse_boot_argn("gpu_cached", &cached, sizeof(cached)) && cached != 0;
 	gGPULock = IOLockAlloc();
+	if (gGPULock == NULL) {
+		IOLog("HakiosGPU: cannot allocate the service lock\n");
+		return;
+	}
 	gpu = OSTypeAlloc(HakiosGPU);
 	if (gpu == NULL || provider == NULL || !gpu->init() || !gpu->attach(provider)) {
 		OSSafeReleaseNULL(gpu);
@@ -341,9 +346,9 @@ HakiosGPUStart(void)
 void
 HakiosGPUStop(void)
 {
-	IOLockLock(gGPULock);
+	if (gGPULock != NULL) IOLockLock(gGPULock);
 	hakios_gpu_stop();
-	IOLockUnlock(gGPULock);
+	if (gGPULock != NULL) IOLockUnlock(gGPULock);
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -1216,3 +1221,5 @@ HakiosGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 	}
 	return ret;
 }
+
+#endif /* HAKIOS_ADRENO || HAKIOS_A540 */

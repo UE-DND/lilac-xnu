@@ -279,8 +279,8 @@ def load_drivers(root):
                 else:
                     raise ConfigError("%s: want file PATH, requires NAME..., default y|n or help TEXT, got %r" % (where, line.strip()))
             for f in files:
-                if not f.startswith(("bsd/dev/hakios.", "iokit/Kernel/hakios.")) or not f.endswith((".c", ".cpp")):
-                    raise ConfigError("%s: %s is not a hakios.*.c or .cpp of bsd/dev/ or iokit/Kernel/" % (where, f))
+                if not re.fullmatch(r"(bsd/dev|iokit/Kernel)/(hakios|lilac)\.[A-Za-z0-9_.-]+\.(c|cpp)", f):
+                    raise ConfigError("%s: %s is not a hakios.* or lilac.* C/C++ driver in bsd/dev/ or iokit/Kernel/" % (where, f))
                 if f in seen_files:
                     raise ConfigError("%s: %s is already built by %s" % (where, f, seen_files[f]))
                 seen_files[f] = where

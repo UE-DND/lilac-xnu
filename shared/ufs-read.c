@@ -103,7 +103,11 @@ static int wait_reg(uint32_t reg, uint32_t mask, uint32_t expected, uint32_t ms)
         if ((ur_reg(reg)&mask)==expected) return 1;
         if (ur_ticks()-start>=ticks) break;
     }
-    return 0;
+    /* The caller can be descheduled after observing a busy register and
+     * before checking the clock. Re-read once at the deadline: a completed
+     * command still goes through the normal OCS, UPIU and queue checks.
+     * If it is still busy, retain the existing no-cleanup timeout path. */
+    return (ur_reg(reg)&mask)==expected;
 }
 static int same_queues(void) {
     return ur_reg(TRBA)==tr && ur_reg(TRBAU)==0 && ur_reg(TMBA)==tm &&
@@ -162,7 +166,7 @@ static int permitted(const uint8_t *u, uint32_t dw0, uint32_t bytes,
     return 1;
 }
 
-static int transfer(uint8_t opcode, uint32_t lba, uint32_t bytes) {
+static int transfer_impl(uint8_t opcode, uint32_t lba, uint32_t bytes, int poison) {
     uint32_t words[8]={0}, descriptor[8]={0}, wire[8];
     uint8_t *u=(uint8_t *)words;
     result->failed_lba=lba;
@@ -180,9 +184,10 @@ static int transfer(uint8_t opcode, uint32_t lba, uint32_t bytes) {
     ur_set_reg(TRRUN,0);
     if (!wait_reg(TRRUN,1,0,100)) { result->error=UR_STOP_TIMEOUT; return 0; }
     if (!same_queues() || ur_reg(TRDB)!=0) { result->error=UR_BAD_STATE; return 0; }
-    /* Clear response/PRDT, poison entire destination to detect stale data. */
+    /* Poison is useful for the diagnostic probe. Completion is established by
+     * the poisoned OCS/response and the checked UPIU, not the data pattern. */
     for (uint32_t i=0;i<0x80;i+=4) ur_store((uint64_t)tr+UCD+i,0);
-    for (uint32_t i=0;i<PAGE;i+=4) ur_store((uint64_t)tm+i,0xa5a5a5a5);
+    if (poison) for (uint32_t i=0;i<PAGE;i+=4) ur_store((uint64_t)tm+i,0xa5a5a5a5);
     for (uint32_t i=0;i<8;i++) ur_store((uint64_t)tr+UCD+i*4,words[i]);
     ur_store((uint64_t)tr+PRDT,tm);
     ur_store((uint64_t)tr+PRDT+12,bytes-1);
@@ -224,6 +229,10 @@ static int transfer(uint8_t opcode, uint32_t lba, uint32_t bytes) {
     for (uint32_t i=0;i<4;i++) result->data_words[i]=data[i];
     result->completed++;
     return 1;
+}
+
+static int transfer(uint8_t opcode, uint32_t lba, uint32_t bytes) {
+    return transfer_impl(opcode,lba,bytes,1);
 }
 
 static int valid_gpt(const uint8_t *p, uint32_t own, uint32_t other) {
@@ -350,7 +359,12 @@ static void finish(struct ur_result *r, uint64_t started) {
     stage(UR_RESTORE,tr);
     ur_set_reg(TRRUN,0);
     if (!wait_reg(TRRUN,1,0,100) || ur_reg(TRDB)!=0 || !same_queues()) { r->error=UR_RESTORE_FAILED; return; }
-    store_page(tr,saved_tr); store_page(tm,saved_tm); ur_barrier();
+    /* Commands change only the slot-0 descriptor and its UCD/PRDT. Do not
+     * rewrite the untouched remainder of the firmware transfer page. Verify
+     * the entire page below so any unexpected modification still fails. */
+    for (uint32_t i=0;i<8;i++) ur_store((uint64_t)tr+i*4,saved_tr[i]);
+    for (uint32_t i=UCD/4;i<(UCD+0x80)/4;i++) ur_store((uint64_t)tr+i*4,saved_tr[i]);
+    store_page(tm,saved_tm); ur_barrier();
     if (!page_equal(tr,saved_tr) || !page_equal(tm,saved_tm)) { r->error=UR_RESTORE_FAILED; return; }
     ur_set_reg(TRRUN,1);
     if (!wait_reg(TRRUN,1,1,100) || !same_queues() || ur_reg(TRDB)!=0) { r->error=UR_RESTORE_FAILED; return; }
@@ -430,7 +444,7 @@ void lilac_ufs_read_range(struct ur_result *r, uint32_t last, uint32_t lba,
     r->block_bytes=PAGE; r->last_lba=last;
     stage(UR_PARTITIONS,lba);
     for (uint32_t i=0;i<count;i++) {
-        if (!transfer(0x28,lba+i,PAGE)) break;
+        if (!transfer_impl(0x28,lba+i,PAGE,0)) break;
         const uint8_t *src=(const uint8_t *)data;
         for (uint32_t j=0;j<PAGE;j++) dst[i*PAGE+j]=src[j];
     }

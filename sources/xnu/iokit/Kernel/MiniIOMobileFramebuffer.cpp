@@ -819,7 +819,27 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 		}
 		if (vinfo.v_depth == 24 || (fRowBytes & 3)) {
 			uint8_t *row = fBase + (size_t)y * fRowBytes;
-			for (int32_t x = cx0; x < cx1; x++) {
+			int32_t x = cx0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+			/* Use aligned word writes for the packed 24-bit Sony scanout.
+			 * Odd strides and clipped edges retain the byte-wise path. */
+			if (vinfo.v_depth == 24) {
+				while (x < cx1 && ((uintptr_t)(row + (size_t)x * 3) & 3)) {
+					uint32_t c = fColumn[x], w = filter ? fColumnWeight[x] : 0;
+					miniPanelWrite(row, x, 24, w == 0 ? from[c] : blend(from[c], from[c + 1], w));
+					x++;
+				}
+				for (; x + 4 <= cx1; x += 4) {
+					uint32_t values[4];
+					for (unsigned i = 0; i < 4; i++) {
+						uint32_t c = fColumn[x + i], w = filter ? fColumnWeight[x + i] : 0;
+						values[i] = w == 0 ? from[c] : blend(from[c], from[c + 1], w);
+					}
+					miniPanelWrite4(row + (size_t)x * 3, values[0], values[1], values[2], values[3]);
+				}
+			}
+#endif
+			for (; x < cx1; x++) {
 				uint32_t c = fColumn[x], w = filter ? fColumnWeight[x] : 0;
 				uint32_t value = w == 0 ? from[c] : blend(from[c], from[c + 1], w);
 				miniPanelWrite(row, x, vinfo.v_depth, value);

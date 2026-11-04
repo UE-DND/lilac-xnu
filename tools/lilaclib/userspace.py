@@ -50,10 +50,18 @@ def main():
     parser.add_argument('--mobile-runtime',action='store_true',help='runtime/volatile var batch, pivot UFS root, real Apple PID1 launchd + notifyd/cfprefsd')
     parser.add_argument('--gpu-firmware-dir',type=Path,help='validated A540 firmware inputs to place on the RAM volume')
     parser.add_argument('--mesa-library',type=Path,help='cross-built OSMesa dylib to test from RAM')
+    parser.add_argument('--gpu-mesa-dir', type=Path, help='experimental Mesa build output for a GPU-capable desktop')
     parser.add_argument('--desktop-attempt',action='store_true',help='start original desktop jobs once and report their process/log state')
     parser.add_argument('--fast-boot',action='store_true',help='skip passed diagnostics and boot desktop without the test dashboard')
+    parser.add_argument('--touchscreen', action='store_true', help='experimental S3330 QUP acquisition and backboardd HID bridge; requires desktop attempt')
+    parser.add_argument('--usb-debug', action='store_true', help='export logs after kernel return; retain touch bridge diagnostics')
+    parser.add_argument('--return-after', type=int, default=0, help='return to BootShim after this many seconds of kernel runtime')
     parser.add_argument('--smp',action='store_true',help='offer firmware-off CPU cores via PSCI')
     args = parser.parse_args()
+    if not 0 <= args.return_after <= 3600:
+        parser.error('--return-after must be between 0 and 3600')
+    if args.usb_debug and args.smp:
+        parser.error('--usb-debug requires single-core boot')
     if args.ufs_system_map and not args.ufs_kernel_probe:
         parser.error('--ufs-system-map requires --ufs-kernel-probe')
     if args.mobile_runtime and not args.ufs_system_map:
@@ -64,6 +72,20 @@ def main():
         parser.error('--desktop-attempt requires --mobile-runtime')
     if args.fast_boot and (not args.desktop_attempt or args.mesa_library):
         parser.error('--fast-boot requires --desktop-attempt and excludes --mesa-library')
+    if args.gpu_mesa_dir and (not args.fast_boot or not args.touchscreen or not args.gpu_firmware_dir):
+        parser.error('--gpu-mesa-dir requires --fast-boot --touchscreen and --gpu-firmware-dir')
+    if args.gpu_mesa_dir:
+        from .hardware import validate_dtb, validate_gpu_render
+        nodes = validate_dtb(args.dtb.read_bytes(), gpu_cx=True)
+        validate_gpu_render(nodes)
+    if args.touchscreen:
+        if not args.desktop_attempt:
+            parser.error('--touchscreen requires --desktop-attempt')
+        from .hardware import validate_dtb
+        validate_dtb(args.dtb.read_bytes())
+    if args.fast_boot and args.return_after:
+        print(f'WARNING: timed diagnostic only: returns after {args.return_after}s from kernel startup, '
+              'even if the desktop is still loading; omit --return-after for interactive use.', flush=True)
     args.output.mkdir(parents=True, exist_ok=False)
     out = args.output.resolve()
     root = out / 'root'
@@ -162,6 +184,9 @@ def main():
                 job['RunAtLoad']=True;job['KeepAlive']=False
                 job['StandardErrorPath']='/dev/null' if args.fast_boot else f'/private/var/log/lilac-{short}.log'
                 if not args.fast_boot:job.setdefault('EnvironmentVariables',{})['OS_ACTIVITY_DT_MODE']='YES'
+                if args.touchscreen and label == 'com.apple.backboardd':
+                    if args.usb_debug:
+                        job.setdefault('EnvironmentVariables', {})['LILAC_TOUCH_DEBUG'] = '1'
                 (root/'LaunchDaemons'/f'{label}.plist').write_bytes(plistlib.dumps(job))
                 mobile_inputs += [source,executable]
             mobile_inputs += [ROOT/'userland/desktop-watch.c',ROOT/'userland/desktop-libs.c']
@@ -181,6 +206,75 @@ def main():
         with (out / logfile).open('w') as log:
             subprocess.run([str(v) for v in command], stdout=log, stderr=subprocess.STDOUT, check=True)
 
+    if args.touchscreen:
+        library = root / 'lib/liblilac.touch.dylib'
+        library.parent.mkdir(mode=0o755)
+        run(['bash', '-c', 'set -eu; source "$1"; shift; exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"',
+             'lilac-input-build', HAKIOS / 'xnu-env.sh', '-arch', 'arm64', '-march=armv8-a', '-O1',
+             '-dynamiclib', '-DLILAC_INPUT_ONLY=1', '-install_name', '/lilac-probe/lib/liblilac.touch.dylib',
+             '-framework', 'CoreFoundation', '-framework', 'IOKit', '-lobjc',
+             HAKIOS / 'userland/src/inject.c', '-o', library], 'touch-bridge-build.log')
+        library.chmod(0o755)
+        commands(library, 6)
+        mobile_inputs += [HAKIOS / 'userland/src/inject.c', HAKIOS / 'userland/src/hakios.input.h',
+                          ROOT / 'userland/touch-bridge.h',
+                          ROOT / 'tools/lilaclib/hardware.py']
+
+    if args.gpu_mesa_dir:
+        mesa_dir = args.gpu_mesa_dir.resolve()
+        mesa_library = mesa_dir / 'libOSMesa.8.dylib'
+        registry, exports, built_from = (mesa_dir / name for name in ('gl.xml', 'exported-gl.txt', 'built-from'))
+        patches = HAKIOS / 'tools/mesa'
+        patch_inputs = sorted(patches.glob('*.patch')) + sorted(path for path in (patches / 'hakios-drm').iterdir() if path.is_file())
+        patch_digest = hashlib.sha256(b''.join(path.read_bytes() for path in patch_inputs)).hexdigest()
+        if built_from.read_text().split()[0] != patch_digest:
+            raise ValueError('GPU Mesa output does not match the current Darwin patches')
+        commands(mesa_library, 6)
+        mesa_copy = obj / 'mesa.dylib'
+        shutil.copyfile(mesa_library, mesa_copy)
+        install_tool = local_path('llvm') / 'llvm-install-name-tool'
+        run([install_tool, '-id', '/private/var/g/mesa.dylib', mesa_copy], 'mesa-install-name.log')
+        dylib_ids = [c[struct.unpack_from('<I', c, 8)[0]:].split(b'\0')[0].decode()
+                     for cmd, c in commands(mesa_copy, 6) if cmd == 0xd]
+        if dylib_ids != ['/private/var/g/mesa.dylib']:
+            raise ValueError('GPU Mesa install name did not change as requested')
+        mesa_bytes = mesa_copy.read_bytes()
+        if len(mesa_bytes) < 1024 or len(mesa_bytes) > 32 * 1024 * 1024:
+            raise ValueError('GPU Mesa library size is outside the supported range')
+        (root/'probe/gpu-mesa.gz').write_bytes(gzip.compress(mesa_bytes, mtime=0))
+        with (obj/'eagl_gen.h').open('wb') as generated:
+            subprocess.run([sys.executable, str(HAKIOS/'userland/mkeagl.py'),
+                            str(HAKIOS/'userland/src/eagl_slots.txt'), str(registry), str(exports),
+                            str(HAKIOS/'userland/src/eagl.c')], stdout=generated, check=True)
+        gl_library = root/'lib/liblilac.gl.dylib'
+        run(['bash', '-c', 'set -eu; source "$1"; shift; exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"',
+             'lilac-gl-build', HAKIOS/'xnu-env.sh', '-arch', 'arm64', '-march=armv8-a', '-O2',
+             '-dynamiclib', '-install_name', '/lilac-probe/lib/liblilac.gl.dylib', '-I'+str(obj),
+             '-framework', 'CoreFoundation', '-framework', 'IOKit', '-framework', 'IOSurface', '-lobjc',
+             HAKIOS/'userland/src/eagl.c', HAKIOS/'userland/src/gl_osmesa.c', mesa_copy, '-o', gl_library], 'gpu-gl-build.log')
+        commands(gl_library, 6)
+        gl_library.chmod(0o755)
+        library = root/'lib/liblilac.touch.dylib'
+        run(['bash', '-c', 'set -eu; source "$1"; shift; exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"',
+             'lilac-gpu-input-build', HAKIOS/'xnu-env.sh', '-arch', 'arm64', '-march=armv8-a', '-O1',
+             '-dynamiclib', '-DLILAC_GPU_INPUT=1', '-DHAKIOS_GL="/lilac-probe/lib/liblilac.gl.dylib"',
+             '-install_name', '/lilac-probe/lib/liblilac.touch.dylib', '-framework', 'CoreFoundation',
+             '-framework', 'IOKit', '-lobjc', HAKIOS/'userland/src/inject.c', '-o', library], 'gpu-input-build.log')
+        commands(library, 6)
+        library.chmod(0o755)
+        run(['bash', '-c', 'set -eu; source "$1"; shift; exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"',
+             'lilac-gpu-unpack-build', HAKIOS/'xnu-env.sh', '-arch', 'arm64', '-march=armv8-a', '-O1',
+             '-DLILAC_GPU_MESA_BYTES='+str(len(mesa_bytes)), ROOT/'userland/gpu-unpack.c', '-lz', '-o', obj/'gpu_unpack'], 'gpu-unpack-build.log')
+        commands(obj/'gpu_unpack', 2)
+        run(['bash', '-c', 'set -eu; source "$1"; shift; exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"',
+             'lilac-gpu-probe-build', HAKIOS/'xnu-env.sh', '-arch', 'arm64', '-march=armv8-a', '-O1',
+             ROOT/'userland/gpu-probe.c', mesa_copy, '-o', obj/'gpu_probe'], 'gpu-probe-build.log')
+        commands(obj/'gpu_probe', 2)
+        mobile_inputs += [mesa_library, registry, exports, built_from, *patch_inputs,
+                          HAKIOS/'userland/mkeagl.py', HAKIOS/'userland/src/eagl_slots.txt',
+                          HAKIOS/'userland/src/eagl.c', HAKIOS/'userland/src/gl_osmesa.c',
+                          HAKIOS/'userland/src/hakios.gl.h', ROOT/'userland/gpu-unpack.c', ROOT/'userland/gpu-probe.c']
+
     run(['bash', '-c', '''set -eu
 source "$1"
 shift
@@ -194,6 +288,8 @@ exec xnu-clang "$@"
          *(['-DLILAC_MESA_PROBE=1'] if args.mesa_library else []),
          *(['-DLILAC_DESKTOP_ATTEMPT=1'] if args.desktop_attempt else []),
          *(['-DLILAC_FAST_BOOT=1'] if args.fast_boot else []),
+         *(['-DLILAC_TOUCHSCREEN=1'] if args.touchscreen else []),
+         *(['-DLILAC_GPU_GL=1'] if args.gpu_mesa_dir else []),
          '-I' + str(HAKIOS / 'userland/libmini'), '-Wl,-e,_start', '-Wl,-pagezero_size,0x100000000',
          ROOT / 'userland/probe-init.c', HAKIOS / 'userland/libmini/mini.c',
          HAKIOS / 'userland/libmini/start.S', '-o', obj / 'probe-init'], 'static-build.log')
@@ -253,6 +349,9 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
         'bin/hello_dyn': obj / 'hello_dyn',
         'usr/lib/dyld': dyld,
     }
+    if args.gpu_mesa_dir:
+        sources['bin/gpu_unpack'] = obj/'gpu_unpack'
+        sources['bin/gpu_probe'] = obj/'gpu_probe'
     if args.mobile_runtime and not args.fast_boot:
         for name in ('runtime_probe','foundation_probe','services_probe','surface_probe','display_probe','graphics_probe','layer_probe','uikit_probe'):
             commands(obj/name,2)
@@ -291,11 +390,20 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
                 raise ValueError(f'APFS readback differs: {name}')
             checked[name] = {'bytes': len(readback), 'sha256': sha(path)}
     run([reader, 'census', out / 'root.apfs'], 'apfs-census.tsv')
+    extra_boot_args = (('lilac_ufs=1 lilac_quiet=1 lilac_ufs_fast=1' if args.fast_boot else 'lilac_ufs=1')
+                       if args.ufs_kernel_probe else 'systrace=2 systrace_name=hello_dyn')
+    if args.touchscreen:
+        extra_boot_args += ' lilac_touch=1'
+    if args.gpu_mesa_dir:
+        extra_boot_args += ' lilac_gpu_snapshot=1 lilac_gpu_cx=1 lilac_a540=7 gpu_cached=1'
+    if args.return_after:
+        extra_boot_args += ' loader_return_after=' + str(args.return_after)
     run([sys.executable, '-m', 'tools.lilaclib.ramboot', '--kernel', args.kernel.resolve(),
          '--ramdisk-format', 'apfs', '--ramdisk', out / 'root.apfs', '--dtb', args.dtb.resolve(),
          *(['--quiet-boot'] if args.fast_boot else []),
          *(['--smp'] if args.smp else []),
-         '--extra-boot-args', ('lilac_ufs=1 lilac_quiet=1 lilac_ufs_fast=1' if args.fast_boot else 'lilac_ufs=1') if args.ufs_kernel_probe else 'systrace=2 systrace_name=hello_dyn',
+         *(['--usb-debug'] if args.usb_debug else []),
+         '--extra-boot-args', extra_boot_args,
          '--output', out / 'image'], 'image-build.log')
     inputs = [ROOT / 'userland/probe-init.c', Path(__file__).resolve(),
               HAKIOS / 'userland/libmini/mini.c', HAKIOS / 'userland/libmini/start.S',
@@ -310,6 +418,9 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
     inputs += mobile_inputs
     inputs += gpu_inputs
     manifest = {
+        'touchscreen': args.touchscreen,
+        'usb_debug': args.usb_debug,
+        'return_after': args.return_after,
         'purpose': ('fast desktop boot via verified UFS image and Apple launchd' if args.fast_boot else 'resident PID1: '+('mobile runtime, RAM var, UFS root pivot and real Apple PID1 launchd/services' if args.mobile_runtime else 'full UFS APFS/cache mount/paging/dynamic batch' if args.ufs_system_map else 'native UFS device batch' if args.ufs_kernel_probe else 'APFS/process/Apple dyld missing dependency diagnostic')),
         'static_entry': static['entry'], 'dynamic_linker': dylinker, 'dynamic_libraries': dylibs,
         'shared_cache_included': False,
@@ -326,6 +437,7 @@ exec xnu-clang -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" "$@"
         'mobile_runtime':args.mobile_runtime,
         'gpu_firmware':bool(args.gpu_firmware_dir),
         'mesa_library':bool(args.mesa_library),
+        'gpu_mesa_dir': str(args.gpu_mesa_dir.resolve()) if args.gpu_mesa_dir else None,
         'desktop_attempt':bool(args.desktop_attempt),
         'fast_boot':bool(args.fast_boot),
         'smp':bool(args.smp),

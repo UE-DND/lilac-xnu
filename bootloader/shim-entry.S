@@ -153,6 +153,15 @@ shim_vectors:
     .endr
 
 _shim_exception:
+#ifdef LILAC_USB_DEBUG
+    mrs     x9, elr_el1
+    adr     x10, shim_debug_load
+    cmp     x9, x10
+    b.eq    _debug_mmio_fault
+    adr     x10, shim_debug_store
+    cmp     x9, x10
+    b.eq    _debug_mmio_fault
+#endif
     msr     daifset, #0xf
     mov     x6, lr
     mov     x7, sp
@@ -168,6 +177,38 @@ _shim_exception:
     bl      shim_on_kernel_return
 1:  wfi
     b       1b
+
+#ifdef LILAC_USB_DEBUG
+_debug_mmio_fault:
+    mrs     x9, esr_el1
+    adrp    x10, shim_debug_fault_esr
+    str     x9, [x10, :lo12:shim_debug_fault_esr]
+    mrs     x9, far_el1
+    adrp    x10, shim_debug_fault_far
+    str     x9, [x10, :lo12:shim_debug_fault_far]
+    adr     x9, shim_debug_failed
+    msr     elr_el1, x9
+    eret
+
+.globl shim_debug_read32
+shim_debug_read32:
+shim_debug_load:
+    ldr     w2, [x0]
+    dsb     sy
+    str     w2, [x1]
+    mov     w0, #1
+    ret
+.globl shim_debug_write32
+shim_debug_write32:
+shim_debug_store:
+    str     w1, [x0]
+    dsb     sy
+    mov     w0, #1
+    ret
+shim_debug_failed:
+    mov     w0, #0
+    ret
+#endif
 
 #ifdef LILAC_UFS_SNAPSHOT
 /* The opt-in snapshot's only UFS MMIO access: one aligned 32-bit load.

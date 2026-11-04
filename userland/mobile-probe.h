@@ -2,6 +2,9 @@
  * One RAM boot: runtime batch, volatile /var, then real PID1 launchd and services.
  */
 #include "var-skeleton.h"
+#ifdef LILAC_TOUCHSCREEN
+#include "touch-bridge.h"
+#endif
 static unsigned mobile_passed,mobile_total;
 static unsigned mobile_results[8];
 static const char *mobile_names[]={"pthread","mach-ipc","kqueue","gcd","unix-socket","xpc-local","ramfs","Foundation"};
@@ -139,6 +142,9 @@ static void mobile_test(int baseline_ok) {
         printf("MOBILE RAM tools mount FAIL errno=%d\n",errno);return;
     }
     mobile_var_ok=mobile_var();if(!mobile_var_ok)return;
+#ifdef LILAC_FAST_BOOT
+    fast_boot_checkpoint("var-ready");
+#endif
 #ifndef LILAC_FAST_BOOT
     for(unsigned i=0;i<8;i++) {
         mobile_results[i]=mobile_run(i==7?"/lilac-probe/bin/foundation_probe":"/lilac-probe/bin/runtime_probe",i==7?NULL:mobile_names[i],0,30);
@@ -182,6 +188,12 @@ static void mobile_test(int baseline_ok) {
     for(unsigned i=0;i<4;i++)if(!mobile_dir(dest[i]) || mount("bindfs",dest[i],MNT_RDONLY,(void *)source[i])) {
         printf("MOBILE launchd overlay FAIL %s errno=%d; static PID1 retained\n",dest[i],errno);return;
     }
+#ifdef LILAC_GPU_GL
+    if(!mobile_run("/lilac-probe/bin/gpu_unpack",NULL,0,90) ||
+        !mobile_run("/lilac-probe/bin/gpu_probe",NULL,0,90)) {
+        puts("lilac GPU: hardware acceptance failed; retaining diagnostic PID1");return;
+    }
+#endif
     if(!mobile_dir("/ios/private/preboot"))return;
     /* Remove the extra child devfs; root switching preserves the original /dev. */
     if(mini_syscall(159,(long)"/ios/dev",0,0,0,0,0)<0) {
@@ -193,6 +205,11 @@ static void mobile_test(int baseline_ok) {
     }
     puts("UFS SYSTEM ROOT: PASS; /private/var=RAM; /dev preserved");
     chmod("/dev/console",0666);
+#ifdef LILAC_TOUCHSCREEN
+    if(!lilac_touch_bridge_configure()) {
+        puts("lilac input: kernel exec injection failed; retaining static PID1");return;
+    }
+#endif
 #ifndef LILAC_FAST_BOOT
     pid_t observer=fork();if(observer==0){mobile_monitor();_exit(0);}
     if(observer<0){puts("MOBILE observer fork FAIL; static PID1 retained");return;}
@@ -206,6 +223,9 @@ static void mobile_test(int baseline_ok) {
 #endif
     if(log<0){printf("MOBILE launchd RAM log FAIL errno=%d\n",errno);return;}
     int console=mini_syscall(SYS_dup,2,0,0,0,0,0);
+#ifdef LILAC_FAST_BOOT
+    fast_boot_checkpoint("launchd-exec");
+#endif
     if(console<0 || dup2(log,2)<0){close(log);return;}close(log);
     char *argv[]={"/sbin/launchd",NULL};
 #ifdef LILAC_FAST_BOOT

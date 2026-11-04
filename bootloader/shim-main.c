@@ -12,6 +12,9 @@
 #include <stddef.h>
 #include "boot_args.h"
 #include "font_8x16.h"
+#ifdef LILAC_USB_DEBUG
+#include "debug-usb.h"
+#endif
 #ifdef LILAC_SMP
 #include "smp-topology.h"
 static int64_t shim_affinity(uint32_t mpidr, void *context) {
@@ -594,6 +597,25 @@ static size_t log_find_last(const char *log, size_t length, const char *needle) 
     return found;
 }
 
+#ifdef LILAC_USB_DEBUG
+void lilac_debug_display(const char *message, uint32_t value) {
+    fill_rect(0, 1170, FB_WIDTH, FB_HEIGHT, 16, 20, 28);
+    draw_string_small(24, 1180, message, 100, 255, 140);
+    draw_hex_small(24, 1204, "USB detail: ", value, 255, 220, 100);
+    draw_hex_small(24, 1228, "MMIO FAR: ", shim_debug_fault_far, 255, 220, 100);
+}
+
+void lilac_debug_diagnostics(uint32_t stage, uint32_t address, uint32_t value,
+    uint32_t event_count, uint32_t last_event) {
+    fill_rect(0, 1040, FB_WIDTH, 1170, 16, 20, 28);
+    draw_hex_small(24, 1048, "USB stage: ", stage, 255, 220, 100);
+    draw_hex_small(24, 1070, "Register: ", address, 255, 220, 100);
+    draw_hex_small(24, 1092, "Value: ", value, 255, 220, 100);
+    draw_hex_small(24, 1114, "Events: ", event_count, 255, 220, 100);
+    draw_hex_small(24, 1136, "Last event: ", last_event, 255, 220, 100);
+}
+#endif
+
 void shim_on_kernel_return(uint64_t log_pa, uint64_t log_len, uint64_t reason,
                            uint64_t esr, uint64_t elr, uint64_t far, uint64_t lr, uint64_t sp) {
     (void)sp;
@@ -659,7 +681,8 @@ void shim_on_kernel_return(uint64_t log_pa, uint64_t log_len, uint64_t reason,
         y += 24;
     }
 
-    if (log_len > 0 && log_pa >= 0x80000000ULL && log_pa < 0xf8000000ULL) {
+    if (log_len > 0 && log_pa >= 0x80000000ULL && log_pa < 0xf8000000ULL &&
+        log_len <= 0xf8000000ULL - log_pa) {
         if (log_len > 2 * 1024 * 1024) log_len = 2 * 1024 * 1024;
         const char *log = (const char *)log_pa;
         size_t panic_start = log_find_last(log, log_len, "\n--- panic text ---\n");
@@ -682,6 +705,11 @@ void shim_on_kernel_return(uint64_t log_pa, uint64_t log_len, uint64_t reason,
     } else {
         draw_string_small(24, y, "(No kernel log text captured yet)", 200, 200, 200);
     }
+#ifdef LILAC_USB_DEBUG
+    if (log_len && log_len <= 2 * 1024 * 1024 && log_pa >= 0x80000000ULL &&
+        log_pa < 0xf8000000ULL && log_len <= 0xf8000000ULL - log_pa)
+        lilac_debug_usb((const void *)log_pa, (uint32_t)log_len);
+#endif
 }
 
 static void jump_to_xnu(uint64_t entry_pa, uint64_t boot_args_pa) {
@@ -701,6 +729,12 @@ static void jump_to_xnu(uint64_t entry_pa, uint64_t boot_args_pa) {
 void shim_main(const uint8_t *payload_ptr, uint64_t dtb_ptr, uint64_t initial_el) {
     (void)dtb_ptr;
     (void)initial_el;
+#ifdef LILAC_USB_SELF_TEST
+    fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 16, 20, 28);
+    static const char usb_test[] = "LILAC USB SELF TEST\nRAM only; no XNU, no persistent storage writes.\n";
+    lilac_debug_usb(usb_test, sizeof(usb_test) - 1);
+    return;
+#endif
     uint64_t mpidr;
     __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
 

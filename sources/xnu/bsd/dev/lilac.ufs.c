@@ -35,7 +35,7 @@ static bool ufs_quiet;
 static uint32_t block_size[130];
 static struct lilac_image_map *image_map;
 static bool image_ready;
-static uint64_t io_calls, io_blocks, io_errors;
+static uint64_t io_calls, io_blocks, io_errors, io_batches, io_ticks;
 #define LILAC_IMAGE_CACHE_SLOTS 256u
 /* Only the validated immutable image is cached; physical partition reads and
  * registration's boundary checks always reach the controller. The IO mutex
@@ -130,7 +130,9 @@ static int read_bytes(uint32_t unit,uint64_t off,uint8_t *dst,uint64_t length) {
                 if (next!=lba+i) {count=i;n=count*4096-in;break;}
             }
         }
+        uint64_t started=ur_ticks();
         lilac_ufs_read_range(&io_result,info.last_lba,(uint32_t)lba,count,(uint8_t *)bounce);
+        io_ticks+=ur_ticks()-started;io_batches++;
         if (io_result.error || !io_result.restored || io_result.completed!=count) {
             dead=true;io_errors++;error=EIO;
             printf("lilac UFS IO STOP error=%u stage=%u lba=%llx restored=%u OCS=%x DB=%x\n",
@@ -207,9 +209,10 @@ static const struct cdevsw cops={.d_open=disk_open,.d_close=disk_close,.d_read=d
     .d_strategy=eno_strat,.d_reserved_1=eno_getc,.d_reserved_2=eno_putc,.d_type=D_DISK};
 SYSCTL_OPAQUE(_kern,OID_AUTO,lilac_ufs_info,CTLFLAG_RD|CTLFLAG_LOCKED,&info,sizeof(info),"S,lilac_ufs_info","Read-only Lilac GPT catalog");
 static int status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req) {
-    char text[256];lck_mtx_lock(&lilac_ufs_lock);
-    snprintf(text,sizeof(text),"ready=%u dead=%u parts=%u checks=%x calls=%llu blocks=%llu errors=%llu boot_commands=%u restored=%u cache_hits=%llu",
-        ready,dead,info.parts,info.checks,io_calls,io_blocks,io_errors,info.commands,info.restored,io_cache_hits);
+    char text[384];lck_mtx_lock(&lilac_ufs_lock);
+    snprintf(text,sizeof(text),"ready=%u dead=%u parts=%u checks=%x calls=%llu blocks=%llu errors=%llu boot_commands=%u restored=%u cache_hits=%llu batches=%llu read_ticks=%llu tick_hz=%llu",
+        ready,dead,info.parts,info.checks,io_calls,io_blocks,io_errors,info.commands,info.restored,io_cache_hits,
+        io_batches,io_ticks,ur_frequency());
     lck_mtx_unlock(&lilac_ufs_lock);return SYSCTL_OUT(req,text,strlen(text)+1);
 }
 SYSCTL_PROC(_kern,OID_AUTO,lilac_ufs_status,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED,0,0,status_sysctl,"A","Mapped Sony UFS IO state");

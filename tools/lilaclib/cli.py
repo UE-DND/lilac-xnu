@@ -171,7 +171,7 @@ def execute_build(target, arguments, output, jobs):
         build_mesa(output, jobs)
     else:
         forwarded = list(arguments)
-        if target in ('ramboot', 'userspace') and not any(value == '--kernel' or value.startswith('--kernel=') for value in forwarded):
+        if target in ('ramboot', 'userspace', 'hardware') and not any(value == '--kernel' or value.startswith('--kernel=') for value in forwarded):
             kernel_path = require(OUT / 'latest/kernel/hakios-kernel', 'kernel; run ./lilac build kernel')
             forwarded += ['--kernel', str(kernel_path.resolve())]
         subprocess.run([sys.executable, '-m', 'tools.lilaclib.' + target, '--output', str(output), *forwarded],
@@ -201,19 +201,26 @@ def parser():
     inputs.add_argument('--ipsw', type=Path, required=True)
     inputs.add_argument('--unpack', action='store_true')
     builder = commands.add_parser('build')
-    builder.add_argument('target', choices=['kernel', 'ramboot', 'userspace', 'system', 'xperable', 'mesa'])
+    builder.add_argument('target', choices=['kernel', 'ramboot', 'userspace', 'system', 'xperable', 'mesa', 'hardware'])
     builder.add_argument('--output', type=Path)
     builder.add_argument('-j', '--jobs', type=int, default=8)
     tests = commands.add_parser('test')
     tests.add_argument('group', choices=['host', 'integration'])
     tests.add_argument('--build', type=Path)
     commands.add_parser('clean')
+    device = commands.add_parser('device')
+    device.add_argument('action', choices=['run', 'collect'])
+    device.add_argument('--build', type=Path, required=True)
+    device.add_argument('--fastboot', type=Path, required=True)
+    device.add_argument('--serial', required=True)
+    device.add_argument('--timeout', type=int, default=600)
+    device.add_argument('--reboot-bootloader', action='store_true')
     return root
 
 
 def run_command(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if len(arguments) >= 3 and arguments[0] == 'build' and arguments[1] in ('ramboot', 'userspace', 'system') and '--help' in arguments:
+    if len(arguments) >= 3 and arguments[0] == 'build' and arguments[1] in ('ramboot', 'userspace', 'system', 'hardware') and '--help' in arguments:
         return subprocess.call([sys.executable, '-m', 'tools.lilaclib.' + arguments[1], '--help'], cwd=ROOT, env=environment())
     arg_parser = parser()
     args, extra = arg_parser.parse_known_args(arguments)
@@ -242,6 +249,11 @@ def run_command(argv=None):
             completed_output = build(args.target, extra, args.output, args.jobs)
         elif args.command == 'test':
             result = test(args.group, args.build)
+        elif args.command == 'device':
+            from . import device
+            if not 1 <= args.timeout <= 3600:
+                raise ValueError('--timeout must be between 1 and 3600 seconds')
+            result = device.run(args)
         elif args.command == 'clean':
             directory = OUT / 'build'
             if directory.is_symlink():

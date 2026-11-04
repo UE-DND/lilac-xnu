@@ -7,6 +7,13 @@
     "excluded_from_pe_parse": ["tests/assets/corkami-poc-dataset"]
   },
   "source_links": {
+    "sources/xnu/bsd/dev/lilac-qup-clock.h": "kernel/lilac-qup-clock.h",
+    "sources/xnu/bsd/dev/lilac-hardware.h": "shared/lilac-hardware.h",
+    "sources/xnu/bsd/dev/lilac-qup-i2c.h": "kernel/lilac-qup-i2c.h",
+    "sources/xnu/bsd/dev/lilac-qup-i2c-tags.h": "kernel/lilac-qup-i2c-tags.h",
+    "sources/xnu/bsd/dev/lilac-clearpad-rmi.h": "kernel/lilac-clearpad-rmi.h",
+    "sources/xnu/bsd/dev/lilac-clearpad-f12.h": "kernel/lilac-clearpad-f12.h",
+    "sources/xnu/bsd/dev/lilac-clearpad-bus.h": "kernel/lilac-clearpad-bus.h",
     "bootloader/ufs-read.c": "shared/ufs-read.c",
     "bootloader/ufs-read.h": "shared/ufs-read.h",
     "kernel/lilac-image.h": "shared/lilac-image.h",
@@ -115,6 +122,52 @@
         "bsd/hfs_encodings"
       ],
       "via": "xnu"
+    }
+  },
+  "development_references": {
+    "linux-msm8998": {
+      "url": "https://github.com/torvalds/linux",
+      "commit": "adc218676eef25575469234709c2d87185ca223a",
+      "tag": "v6.12",
+      "purpose": "QUP FIFO protocol, MSM8998 clocks and pinmux, A540 bring-up reference; not a build-time download",
+      "files": {
+        "drivers/i2c/busses/i2c-qup.c": "cb273214ed20a28e423c1d55299b0481ee30458296b43607985e1a5280c03769",
+        "drivers/clk/qcom/gcc-msm8998.c": "b76f60946140ca6387979222ef4ea8a7a3530d09e1ddf6c1e5a431b6e132745b",
+        "drivers/clk/qcom/clk-rcg2.c": "ff1bc46cf2d10b3d31499f2188b3d9793a00ee4f1bc92a62c724c28cd0d8d6a5",
+        "drivers/clk/qcom/gdsc.c": "e1210770ad3e4406adaca4eb0d6d103823d73a65068cf1ff48183bb1a347d32d",
+        "drivers/usb/dwc3/core.h": "a68158690b09c2b6f117b214b6c5caf7bd7048db1d4aca68f4654cfd78638e9c",
+        "drivers/usb/dwc3/core.c": "74bb63d884584f0d6f7a45724ba022ba461d48b46afa05ca7a0024d83fbd1c2e",
+        "drivers/usb/dwc3/ep0.c": "3b68f7fa192ab1c4e29c9b110e62fa960cb2b60b8429e2eea2f531fc6a89cd6e",
+        "drivers/usb/dwc3/gadget.c": "8dcd869a16a02066f8793410430d9bc084d470e07a8f0b0e49d7706d25a2fd10",
+        "drivers/usb/dwc3/gadget.h": "c24bbe664bcb9678df59bef9b930952748b45285841c59f6aa7c6981c1862123",
+        "drivers/usb/dwc3/dwc3-qcom.c": "bec5907a001c6d7c9c3d03102ef78405fdb0580461316413dc02cb1d7b25008a",
+        "drivers/phy/qualcomm/phy-qcom-qusb2.c": "e5bd586c6b06212805202782651260d649979efc97565b7df0d4635ef46b7339",
+        "drivers/clk/qcom/gpucc-msm8998.c": "dea2f5c43640ea5a8ea40220e9595795b043e1894013b4ea974d1863ae7631b0",
+        "drivers/pinctrl/qcom/pinctrl-msm8998.c": "96402265d3aa737fe25fafb5a2a73603e2efb7804103d49cf1084be25ac8722a",
+        "drivers/gpu/drm/msm/adreno/a5xx_gpu.c": "de1963851ba66ec013519a5bde67f483e2026773056c4b2f285a9c026c5928db"
+      }
+    },
+    "sony-clearpad": {
+      "url": "https://github.com/sonyxperiadev/kernel",
+      "commit": "696bf91693d3d8b03dd8a4afa1b12a78b33b6d73",
+      "branch": "aosp/LA.UM.6.4.r1",
+      "purpose": "S3330 RMI/F12 and QUP protocol reference; no touchscreen firmware flash code is imported",
+      "files": {
+        "drivers/video/fbdev/msm/somc_panel/panel_incell.c": "beedc64b605676e31d71639e3a28b2ff9de2ece90a1675f6fc2ac2b4b8882308",
+        "drivers/video/fbdev/msm/somc_panel/panel_regulators.c": "5cd51a6bec8baab7bbacf944f90cd85e65ea32b0b2b6e6153bc3c716572e6be6",
+        "drivers/video/fbdev/msm/somc_panel/panel_driver.c": "275ed15060dfedb6cf5d7550dfa7c4851069fa2f8db69bf52f770a3a78993fe0",
+        "drivers/input/touchscreen/clearpad_incell_core.c": "068c8fb63ca3e8be327f801e1a320c1f2beb2192cd8c0bcbefd9354c8afa8875",
+        "drivers/power/reset/msm-poweroff.c": "228473d6ad3f08d341d2dd5c290da52ead9f4a9bb17beb5181cd240525f41c90",
+        "drivers/input/misc/qpnp-power-on.c": "a1f253f8864e307a3bbb24f7ab0038a15b5abcde79d36baff2197a9903a1fe98",
+        "drivers/clk/msm/clock-gcc-8998.c": "c56f9115bba341c8ff30017164a30cc99750ce88a3c69b00d50b3adbc18aa68c",
+        "include/dt-bindings/clock/msm-clocks-8998.h": "d52adc03e96cd5f66291db7b12c470f0f62f35752fe85882af25d3c7c0948be8",
+        "include/dt-bindings/clock/msm-clocks-hwio-8998.h": "38b29e3327e977d2d8e405ff73d8a856536fd0ef8d9e1c0c44ea32394ac86461",
+        "include/linux/input/qpnp-power-on.h": "e04661d41ee2ca0733692dbd0dbbd2cfbcd72e7121c295255cb6d9d4f5542c85",
+        "drivers/spmi/spmi-pmic-arb.c": "24fd3cd54ef20fb631576b560ae9fd22078f6ef09ea8d66aea2982412df307d6",
+        "drivers/input/touchscreen/clearpad_core.c": "9167f0c04496fb0de11b06479b6cd79007f943a1dd3527cd6e7390550eb16413",
+        "drivers/i2c/busses/i2c-msm-v2.c": "2702d9e07388d42616c38fc262ff23c49b84e40e493069694a804681d0c0ad44",
+        "include/linux/i2c/i2c-msm-v2.h": "6f9b8ff0156fdf1b95735e32e840f0f865b123ce55c980334f446a657eeff43a"
+      }
     }
   },
   "dependencies": {

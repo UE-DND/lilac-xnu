@@ -114,7 +114,10 @@ bsd/dev/hakios.audio.c                   standard
 bsd/dev/hakios.version.c                 standard
 bsd/dev/hakios.platform.c                standard
 bsd/dev/hakios.stubs.c                   standard
+bsd/dev/lilac.gpu-snapshot.c             standard
+bsd/dev/lilac.rpm.c                      standard
 bsd/dev/hakios.input.c                   standard
+bsd/dev/lilac.touch.c                    standard
 bsd/dev/hakios.net.c                     standard
 bsd/dev/hakios.image.c                   standard
 bsd/dev/hakios.sparse.c                  standard
@@ -129,6 +132,7 @@ bsd/dev/hakios.bt.c                      optional hakios_bt
 bsd/dev/hakios.camera.c                  optional hakios_camera
 bsd/dev/hakios.torch.c                   optional hakios_torch
 bsd/dev/hakios.socinfo.c                 optional hakios_socinfo
+bsd/dev/lilac.a540.c                     optional hakios_a540
 bsd/dev/hakios.adreno.c                  optional hakios_adreno
 bsd/dev/hakios.haptic.c                  optional hakios_haptic
 bsd/dev/hakios.virtio_input.c            optional hakios_virtio_input

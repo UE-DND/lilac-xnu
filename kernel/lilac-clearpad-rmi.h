@@ -17,6 +17,12 @@ struct lilac_rmi_device {
     struct lilac_f12_state fingers;
 };
 
+static inline int lilac_rmi_configured(uint8_t control, uint8_t requested, uint8_t status)
+{
+    return !(control & 3) && (control & 0x7f) == (requested & 0x7f) &&
+        !(status & 0xc0) && (status & 15) <= 1;
+}
+
 static inline int lilac_rmi_read_at(lilac_rmi_read read, void *ctx, uint8_t page,
     unsigned addr, uint8_t *buf, size_t n)
 {

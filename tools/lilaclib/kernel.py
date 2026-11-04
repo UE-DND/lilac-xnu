@@ -10,11 +10,16 @@ from .paths import ROOT, XNU, HAKIOS, OUT, DEPS, environment as base_environment
 from .records import digest, fingerprint, inventory, save_json
 
 OBJECT_FLAGS = {
+    'lilac.touch.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
+    'lilac.gpu-snapshot.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
+    'lilac.rpm.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
+    'lilac.a540.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'lilac.ufs.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'lilac.ufs-transport.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align -DLILAC_UFS_IO_EXTERNAL=1',
     'lilac.image.o': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'MiniIOMobileFramebuffer.cpo': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
     'MiniIOSurface.cpo': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
+    'hakios.gpu.cpo': '-march=armv8-a -mgeneral-regs-only -mstrict-align',
 }
 
 

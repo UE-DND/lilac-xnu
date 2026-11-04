@@ -1526,6 +1526,18 @@ static void
 handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
+#if defined(GENERIC_GIC_V3_IRQ)
+    extern bool lilac_touch_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
+    if (lilac_touch_abort(state, esr, fault_addr)) return;
+    extern bool lilac_gpu_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
+    if (lilac_gpu_abort(state, esr, fault_addr)) return;
+    extern bool lilac_rpm_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
+    if (lilac_rpm_abort(state, esr, fault_addr)) return;
+#ifdef HAKIOS_A540
+    extern bool lilac_a540_abort(arm_saved_state_t *, uint32_t, vm_offset_t);
+    if (lilac_a540_abort(state, esr, fault_addr)) return;
+#endif
+#endif
 	thread_t thread = current_thread();
 	bool recover = find_copyio_recovery_entry(state) != 0;
 

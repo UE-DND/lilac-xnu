@@ -39,6 +39,8 @@ struct hakios_touch {
 /* For drivers; not from interrupt context. */
 void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 void hakios_input_init(void);
+void lilac_touch_init(void);
+void lilac_gpu_snapshot_init(void);
 void hakios_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void hakios_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
 void hakios_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
