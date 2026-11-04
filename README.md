@@ -1,6 +1,6 @@
 # lilac-xnu
 
-将 XNU 和 Darwin 移植到 Sony Xperia XZ1 Compact（`lilac`，MSM8998）的实验项目。项目包含 BootShim、只读 UFS、软件显示及用户空间诊断。原版 Apple launchd 和部分 Foundation、IOSurface 检查已在设备运行；GPU 加速、触摸、持久可写数据卷及完整桌面尚未完成，见[项目状态](docs/STATUS.md)。
+将 XNU 和 Darwin 移植到 Sony Xperia XZ1 Compact（`lilac`，MSM8998）的实验项目。项目包含 BootShim、只读 UFS、软件显示及用户空间诊断。原版 Apple launchd、部分 Foundation/IOSurface 检查和 S3330 多点触摸采集已在设备运行；A540 的 Mesa shader/纹理像素及 GPU 桌面合成现已通过真机验证（固定低频、单环）；桌面触摸端到端验收、持久可写数据卷及完整系统服务尚未完成，见[项目状态](docs/STATUS.md)。
 
 ## 源码与环境
 
@@ -56,6 +56,18 @@ SDK、IPSW、Sony 固件、设备 DTB 和物理区间映射由使用者提供，
 Mesa 的 Python 依赖、Meson 和 Ninja 使用锁定版本并校验 wheel 哈希，只安装到 `out/` 下的独立环境。还需本机提供 Bison 3 或更新版本、flex 及 LLVM 工具；macOS 可用 `PATH="$(brew --prefix bison)/bin:$PATH" ./lilac build mesa` 选择已安装的新版 Bison。Mesa 不承诺逐字节复现。
 
 下载工具位于 `out/latest/xperable/xperable`，默认编译 p114 目标。使用 `--loader /path/to/LinuxLoader-p114.pe` 将已提取且与设备 ABL 匹配的模块复制到产物目录；构建工具不下载固件，也不自动连接设备。原始协议参数见其源码目录中的 `README.rst`。
+
+## RAM USB 调试
+
+```sh
+./lilac build hardware --kernel out/latest/kernel/hakios-kernel \
+  --touch --gpu-snapshot --usb-debug --return-after 90
+./lilac device run --build out/latest/hardware \
+  --fastboot /path/to/platform-tools/fastboot --serial BH905S2WB5 \
+  --timeout 600 --reboot-bootloader
+```
+
+该目标是文字诊断页，不启动桌面。内核定时返回或 panic 后，通过 USB 保存并校验日志，再返回 Sony Fastboot；省略 `--reboot-bootloader` 则只采集。已在当前 p114 固件验证，不提供内核运行中的实时日志或硬锁死恢复，不刷写分区。USB 自检、现有镜像采集和验收记录见 [RAM USB 调试](docs/USB-DEBUG.md)。
 
 ## 测试与目录
 
