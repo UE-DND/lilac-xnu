@@ -1,32 +1,39 @@
 # 用户空间与系统材料
 
-RAM APFS 中的 `/sbin/launchd` 最初是 `userland/probe-init.c` 实现的静态监督程序。它检查进程和存储后挂载 UFS 系统镜像；移动模式进一步准备 RAM 数据卷，切换根卷并执行原版 Apple launchd。流程见[移动运行时](MOBILE.md)。
+在系统引导初期，RAMDisk 中的 `/sbin/launchd` 首先由 `userland/probe-init.c` 编译生成的静态监督程序接管。该监督程序负责自检存储与虚拟块设备，挂载 UFS 中的 APFS 系统镜像，初始化基于 RAM 的 `/private/var` 易失数据卷，随后执行根卷切换并将 PID 1 控制权移交至原版 Apple `launchd`。系统运行时的详细时序请参阅[移动运行时与 launchd](MOBILE.md)。
 
-## 准备 iOS 文件
+## 准备 iOS 系统材料
 
-现有流程使用 iOS 16.5（20F66），支持的 IPSW 标识为 iPhone10,3 和 iPhone10,6。输入文件应为 6,165,698,198 字节，SHA-256 为 `c1091c401f67e3aa7cdfeb2cc19e6c79be3c957aae4e097a019e9ccea07d52f2`。
+系统运行环境基于 iOS 16.5（版本号 20F66，适配机型标识包括 iPhone10,3 与 iPhone10,6）构建。
 
-自行取得文件后运行：
+准备好对应机型的官方 IPSW 固件文件后，使用 `./lilac` 命令提取并解包系统根文件系统（RootFS）：
 
 ```sh
 ./lilac inputs ios \
   --ipsw /path/to/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw --unpack
 ```
 
-工具先检查哈希、BuildManifest 和成员大小，再将材料提取到本地配置指定的 `ios` 目录，默认是 `local/ios/16.5-20F66/`。不加 `--unpack` 时只校验并提取 DMG。工具不会连接设备。原始系统树、SDK 和 Apple 二进制均留在本地。
+解包工具会首先核验固件文件的完整性、BuildManifest 清单及各成员大小，随后将 RootFS 提取至本地配置指定的目录（默认位于 `local/ios/16.5-20F66/`）。若不指定 `--unpack` 参数，则仅校验并解包原始 DMG 镜像。
 
-43 个原始 arm64 shared cache 共 2,722,512,896 字节；当前流程保留原始 cache，不拆分为 dylib。
+### 动态共享缓存（Shared Cache）机制
+
+iOS 16.5 包含完整的原始 arm64 Shared Cache。构建流程直接保留完整的 Shared Cache 二进制文件，不进行拆解或修改，以保证动态链接器 `dyld` 具备最佳的加载与链接性能。
 
 ## 构建系统镜像
 
-先准备内核和用户空间，再构建系统镜像：
+在完成内核与用户空间工具编译后，执行系统镜像构建：
 
 ```sh
+# 1. 编译 XNU 内核
 ./lilac build kernel
+
+# 2. 编译用户空间诊断与引导工具
 ./lilac build userspace
+
+# 3. 打包生成 APFS 系统磁盘镜像
 ./lilac build system
 ```
 
-也可以通过 `--probe-binary PATH` 指定 `hello_dyn`。构建器只操作主机文件。将镜像放入设备后，必须重新测量物理区间并生成映射；见 [UFS 系统镜像](UFS-SYSTEM.md)。
+`build system` 会在输出目录中生成完整的 APFS 格式磁盘镜像，并自动校验 Shared Cache 及系统二进制的完整性。
 
-当前 Fastboot 传输上限约为 16 MiB，XNU 内存窗口为 1.375 GiB。系统和 shared cache 按需从 UFS 读取，不能作为一个完整 RAMDisk 装入。
+由于 Sony Fastboot 协议对单次 RAM 镜像传输大小有限制，且 XNU 内存管理窗口配置为 1.375 GiB，容量庞大的 iOS 系统镜像无法整体放入 RAMDisk 启动，必须将其部署至 UFS 存储并通过物理扇区映射表按需分页加载，具体部署细节见 [UFS 系统镜像映射](UFS-SYSTEM.md)。

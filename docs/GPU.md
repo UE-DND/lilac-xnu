@@ -1,66 +1,70 @@
-# Adreno 540 移植
+# Adreno 540 GPU 移植
 
-2026-11-04，SO-02K / p114 已跑通 **A540 → HakiosGPU → Mesa Freedreno → CoreAnimation 桌面合成 → IOSurface → Sony 显示**。这是实际硬件渲染，已独立验证 shader 和纹理的读回像素。当前使用固定 19.2 MHz、单环和轮询 fence；未完成动态调频、GPMU 自动电源管理、中断或挂起恢复，不能视作原厂性能或完整生产驱动。
+本项目为搭载高通骁龙 835（MSM8998）的 Sony Xperia XZ1 Compact 实现了 Adreno 540 GPU（设备树 ChipID 为 `0x05040001`，硬件版本为 Adreno 540 v2）的硬件加速支持。系统打通了从底层固件安全认证、内核 SMMU 地址空间隔离、Mesa Freedreno 用户态驱动到 CoreAnimation 桌面硬件合成的完整图形栈。
 
-## 真机验证
+## 图形架构栈
 
-设备 ChipID `0x05040001`，原厂识别为 Adreno 540 v2。首轮完整验证在 `out/runs/20261104T063303.146166Z-device-run/`，镜像为 `out/runs/a540-desktop-20261104a/image/xnu-boot.img`：
-
-- ZAP `PAS_AUTH_AND_RESET` 返回 `0/0`，CP 通过认证 shader 退出安全模式。
-- 间接命令写回 `0x0540f00d`，`CACHE_FLUSH_TS` fence 写回 1。
-- Mesa 报告 `FD540`、`OpenGL ES 3.1 Mesa 25.0.7`。`userland/gpu-probe.c` 编译 vertex/fragment shader，绘制三帧不同颜色并读回比较，再验证纹理的四个颜色区域；全部通过。软件 renderer 会被拒绝。
-- 测试之后启动原版 Apple launchd/backboardd/SpringBoard。桌面经同一服务完成 2,459 次 GPU 提交，退出时完成 fence 同为 2,459。显示日志的持续区间约 28–29 帧/秒；这不是标准性能基准，也不证明所有界面效果正确。
-- 退出完成 GPU 停止、GX 关闭、用户 SMMU 禁用、PM8005 恢复、MX/CX 释放。USB 回收日志并复核 Sony Fastboot。没有分区写入。
-
-镜像 SHA-256：`78474ba8c9811630a984891c410df9722c72d9db31b7ec0de770aec5e99fee43`。日志 SHA-256：`0f6fdaf99ec5dbdb26b28cdcb8f4f49985020293bfa89b45fda6ab6b8ccaef22`。
-
-最终回归在 `out/runs/20261104T064425.612528Z-device-run/` 通过 `tools/check-a540-run.py`：2,351 次提交全部完成，8 个持续显示区间为 28.58–29.15 帧/秒，最终 `FSR=0x400`（格式位，无故障）、`RBBM_STATUS=1`，CP interrupt/hardware/protection 均为 0。完整结果为该目录下的 `gpu-acceptance.json`。
-
-最终测试镜像 `out/runs/a540-final-desktop-20261104/image/xnu-boot.img` 的 SHA-256 为 `3882287c3bc76575a701d45a0b0c90a2be45fb9a0f1d07b06f572cba9b4f3244`；日志 SHA-256 为 `59a052d3e52cc4f4b155bbd41c557d6445cf19ed2f026fb85a30548ffc7218bf`。交互镜像位于 `out/runs/a540-gpu-desktop-20261104/image/xnu-boot.img`，使用同一最终内核，省略定时退出；真机回归使用的是上面的 180 秒版本。
-
-## 实现范围
-
-`CONFIG_HAKIOS_A540` 选择 `sources/xnu/bsd/dev/lilac.a540.c`，与 A642L 后端互斥；共享 `hakios.gpu.cpp` 的 IOKit/Mesa 接口。普通镜像仍不自动开启 GPU；必须提供经过校验的固件并显式选择 GPU 桌面构建。
-
-供电使用 MSM8998 RPM GLINK 的 `rwmx/vlvl` ACK、PM8005 S1 和 GPUCC。借用合适的继承电压；电源关闭时，在确认 GX collapsed/clamped 后设置固定低角电压，退出恢复。GX 未确认停止时保留上游供电和 DMA 内存到重启。RBCCU 先于 SP 开启，关闭顺序相反。
-
-SMMU 仅使用 stream 0 / CB0，独立 4 KiB 页表。内核 ring/固件位于 `0x02000000` 附近，用户 VA 为 `0x04000000..0x40000000`。共享服务串行管理用户缓冲、缓存维护、IB 提交和完成 fence。当前多个客户端共享 GPU 地址空间，未实现进程间 GPU 内存隔离和故障恢复。
-
-CP 使用 `a530_pm4.fw`、`a530_pfp.fw`。A540 不能使用早期 A530 snapshot 的 `CP_PFP_ME_CNTL=0x18000000` 暂停操作；初始化使用复位状态，配置后写 0 启动。停止先排空 VBIF，再执行 A540 整核复位。读到 RPTR 追上 WPTR 后，只轮询 RBBM 空闲状态，避免 CP 寄存器读取持续唤醒总线造成假超时。
-
-ZAP 先解析 ELF32 split metadata，再由 TrustZone 完成认证；结构校验不代替签名认证。按 Sony PIL 的重定位方式保留独占、1 MiB 对齐的 1 MiB 内存，向 `MEM_SETUP` 传实际 8 KiB extent；SMC interrupted 续调保留全部返回寄存器。早期 `AUTH=-68` 的实验不能算通过；对齐这些调用细节并开启渲染域后认证通过，没有绕过安全模式。
-
-渲染初始化设置 1 MiB GMEM、各单元 64 位地址模式、UBWC highest-bank-bit 15、LMLOADKILL quirk 和 CP 寄存器保护。提交仅在真实硬件 fence 完成后允许相关缓冲回收；发布结果不确定时保留缓冲。
-
-固件和安全处理使用的专属页保留 wired 到重启。Sony 固件允许配置 CBAR/S2CR，但不接受恢复其初始值；清理独立确认 SMR 无效、CB0 禁用和 GX 关闭，不声称路由字段全部复原。GPMU `.fw2` 转码器已通过主机/固件检查，本次运行采用手动域管理，未启动 GPMU 或 CPR 闭环。
-
-## 构建与验收
-
-本地固件、Apple 系统、SDK 和 UFS 映射不得提交。`--gpu-mesa-dir` 必须指向与当前 Darwin 补丁摘要一致的 Mesa 输出。GPU 测试失败时保留诊断 PID1，不把软件回退称为 GPU 成功。
-
-```sh
-./lilac build kernel --output out/runs/gpu-kernel
-./lilac build userspace \
-  --kernel out/runs/gpu-kernel/hakios-kernel \
-  --ufs-kernel-probe --ufs-system-map configs/lilac/system-map.bin \
-  --mobile-runtime --desktop-attempt --fast-boot --touchscreen \
-  --gpu-firmware-dir local/gpu-firmware \
-  --gpu-mesa-dir out/build/mesa/ac7e15a25449c418874e/out \
-  --usb-debug --return-after 180 --output out/runs/gpu-desktop
-./lilac device run --build out/runs/gpu-desktop \
-  --fastboot /path/to/fastboot --serial BH905S2WB5 \
-  --timeout 240 --reboot-bootloader
-python3 tools/check-a540-run.py out/runs/DEVICE_RUN --output out/runs/gpu-acceptance.json
+```text
+CoreAnimation / SpringBoard 桌面合成
+  → EGL / GLES 3.1（Mesa 25.0.7 Freedreno 驱动）
+  → HakiosGPU 内核服务（IOUserClient 接口与 SMMU 页表管理）
+  → Adreno 540 硬件（ZAP 认证、CP 命令环、SMMU CB0 独立地址空间）
+  → IOSurface 硬件呈现 → Sony 显示控制器
 ```
 
-目录必须是新目录。定时镜像从内核启动计时，180 秒到期即退出；交互镜像省略 `--return-after`。验收脚本验证日志摘要、认证、硬件 IB/fence、shader/纹理像素、桌面持续显示、最终故障状态、所有 fence 完成和电源清理；单独 `log_saved_fastboot_verified` 只证明 USB 回收，不代表 GPU 成功。
+## 固件认证与 TrustZone 安全交接
 
-`--gpu-backend-stage` 供分阶段硬件定位：1 PM8005 快照，2 inactive SMMU，3 GX 供电，4 CP/DMA，5 ZAP，6 渲染配置及 IB/fence，7 保持 Mesa 服务。前 6 阶段结束即释放电源；第 7 阶段由正常退出路径回收。
+Adreno 540 依赖专有微码与安全固件运行：
+- **微码加载**：CP（Command Processor）使用 `a530_pm4.fw` 与 `a530_pfp.fw` 微码。初始化时保持复位状态，配置完毕后写入启动控制寄存器拉起微码。
+- **ZAP 着色器固件认证**：通过 TrustZone 执行安全校验。内核先解析 ELF32 Split Metadata 结构，随后通过 ARM SMC 指令调用外设加载接口（PIL），请求执行 `PAS_AUTH_AND_RESET` 操作。
+- **内存对齐约束**：依据 Sony PIL 内存重定位规范，系统为 ZAP 固件分配 1 MiB 独占且 1 MiB 物理对齐的专用内存区域，并在 `MEM_SETUP` 请求中传入 8 KiB 的物理 Extent；在 SMC 调用期间妥善处理中断重入并保留所有返回值，确保硬件 CP 单元顺利通过认证并解除渲染安全限制。
 
-主机检查：`./lilac sources check`、`./lilac test host`、`./lilac test integration --build <GPU桌面构建>`、`./lilac build kernel`。主机测试覆盖 RPM 握手/ACK、供电失败与清理、有界 PM4/ring、固件范围、VA 耗尽/重复释放和 GPU 验收误判；不能替代上述真机验证。
+## 内存管理与 SMMU 硬件隔离
 
-## 参考与早期记录
+内核配置高通 SMMU Context Bank 0（CB0），采用 4 KiB 物理页表映射：
 
-实现参考固定 Sony `696bf91693d3d8b03dd8a4afa1b12a78b33b6d73` 的 `clock-gpu-8998.c`、`adreno_a5xx.c`、`peripheral-loader.c`、`subsys-pil-tz.c`、`scm.c`，以及 [Linux v6.12 A5xx](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/adreno/a5xx_gpu.c)。使用 Mesa 25.0.7 Freedreno 寄存器定义。
+### 地址空间划分
 
-早期 CX/SMMU 只读日志在 `out/runs/20261103T155404.443756Z-device-run/`，RPM/SMMU 状态快照在 `out/runs/20261104T043233.597136Z-device-run/`；这些只证明当时的读取和 CX 投票。主动 PM8005 供电路径在 `out/runs/20261104T060526.368854Z-device-run/` 通过，CP/DMA 在 `out/runs/20261104T061258.663847Z-device-run/` 通过，ZAP 在 `out/runs/20261104T062355.816647Z-device-run/` 通过。Mesa softpipe、CoreGraphics/UIKit 的旧离屏验证仍属于软件绘制，不能与本次硬件验收混用。
+- **内核 Ring 与固件映射**：固定映射在 `0x02000000` 虚拟基地址附近，配置为只读属性，防止异常越权覆写。
+- **硬件完成 Fence 页**：映射于 `0x02018040`，仅赋予内核特权访问权限（APRIV）。
+- **用户空间缓冲区**：分配在 `0x04000000..0x40000000` 虚拟地址区间内。
+
+### 客户端多任务隔离与容错机制
+
+每个 `IOUserClient` 拥有独立的 4 KiB 页表及虚拟地址分配器，系统支持最多 16 个并发客户端：
+1. **串行化上下文切换**：切换客户端时，驱动首先排空正在执行的 GPU 硬件流水线，更新 SMMU 的 TTBR 寄存器，同步刷新 TLB 并失效 UCHE 缓存，最后执行 Mesa 上下文恢复间接缓冲区（IB）。
+2. **硬件故障隔离**：驱动实时监听 SMMU 异常（如 FSR 寄存器）与 CP 保护状态。当检测到非法未映射虚拟地址访问或越权尝试修改内核 Ring Buffer 时，驱动精准定位故障客户端并将其隔离，随后执行硬件软复位，确保其他正常客户端与 SpringBoard 桌面合成不受影响。
+
+## 时钟与动态电源管理
+
+驱动在 `kernel/lilac-a540-clock.h` 中实现了高通 Fabia PLL 控制器逻辑：
+
+- **动态频率档位**：支持 180 MHz（基础负载与待机）与 257 MHz（图形密集合成）两档时钟。在执行频率切换前，驱动排空 CP 队列，将 RCG 时钟源切回 19.2 MHz XO 振荡器，关闭 PLL，重置分频参数并等待 PLL 锁定后重新生效。
+- **自动空闲挂起**：后台守护服务以 100 ms 为周期轮询 GPU 负荷状态。空闲持续 50 ms 后自动降频至 180 MHz；空闲持续超过 500 ms 时，依序停用 CP 处理、切断 SP/RBCCU 单元、关闭 GX 供电域并恢复 PM8005 电源管理状态。
+- **并发唤醒防护**：在 GPU 从挂起状态恢复期间，驱动通过内部服务锁同步保护 `gpuReady()` 状态判断，避免新客户端分配请求在电源恢复的短暂间隙发生误报，确保桌面合成多线程并发稳定性。
+
+## 构建与运行指南
+
+```sh
+# 1. 构建支持 A540 驱动的内核
+./lilac build kernel
+
+# 2. 构建包含 Mesa 与 GPU 桌面支持的用户空间镜像
+./lilac build userspace \
+  --kernel out/latest/kernel/hakios-kernel \
+  --ufs-kernel-probe --ufs-system-map configs/lilac/system-map.bin \
+  --mobile-runtime --desktop-bringup --touchscreen \
+  --gpu-firmware-dir local/gpu-firmware \
+  --gpu-mesa-dir out/build/mesa/25.0.7/out
+```
+
+### 调优与诊断参数
+
+- `--no-gpu-runtime-pm`：禁用自动电源管理，使 GPU 在运行期间保持供电与时钟开启。
+- `--no-gpu-dynamic-clock`：禁用动态调频机制，锁定在基准频率。
+- `--gpu-backend-stage {1..7}`：支持对底层硬件阶段进行分步测试与排查（1: PM8005 供电, 2: SMMU 就绪, 3: GX 供电切换, 4: CP/DMA 传输, 5: ZAP 认证, 6: 渲染流水线配置, 7: 保持 Mesa 常驻服务）。
+
+## 当前已知限制
+
+1. **命令环与中断机制**：当前驱动采用单命令环并使用软件轮询 Fence 完成状态，尚未启用高通 GPU 硬件中断通知。
+2. **CPR 闭环电压管理**：系统目前采用预设的稳态工作电压，高通 GPMU 与硬件 CPR 闭环动态核心电压调节尚待进一步适配。

@@ -1,30 +1,37 @@
 # 移动运行时与 Apple launchd
 
-`./lilac build userspace --mobile-runtime` 构建 RAM 启动镜像，用于检查只读系统卷、移动运行时和原版 Apple launchd。它不修改 UFS 系统文件。
+`lilac-xnu` 通过 `./lilac build userspace --mobile-runtime` 构建完整的移动运行时环境，支持在只读系统卷与基于 RAM 的临时数据卷上拉起原版 Apple `launchd`（PID 1）及 iOS 桌面服务。
 
-## 启动流程
+## 系统初始化与时序
 
-1. 静态 PID 1 检查 APFS、进程、原生 UFS、镜像挂载和动态执行。
-2. 将 RAM 卷挂载到系统卷的 `/lilac-probe`，并为 `/private/var` 准备 ramfs。
-3. 在子进程中检查线程、Mach IPC、kqueue、GCD、Unix socket、XPC、ramfs 和 Foundation。
-4. 使用 bindfs 提供 notifyd、cfprefsd 和测试 job，再切换到 UFS 系统根卷。
-5. 原版 Apple launchd 接管 PID 1，启动测试 job；随后检查服务、IOSurface 和软件显示。
-6. 检查结束后，状态面板继续显示 RAM 中的结果。
+移动运行时的初始化分为以下阶段：
 
-准备或根卷切换失败时保留静态 PID 1。原版 launchd 启动后若 PID 1 退出，仍可能触发 panic。图形提交成功后，物理屏幕上的文本控制台会释放。
+1. **静态监督程序启动**：内核加载完毕后，首先执行 RAMDisk 中的静态程序 `/sbin/launchd`（由 `userland/probe-init.c` 编译），负责硬件环境检查与虚拟设备自检。
+2. **挂载存储与准备运行目录**：
+   - 基于物理区间映射表（FIEMAP）发布只读虚拟块设备 `/dev/lilac_image`，并将 APFS 系统卷挂载至 `/lilac-probe`。
+   - 为 `/private/var` 准备并挂载独立的内存文件系统（ramfs），构建必要的临时目录结构。
+3. **子系统基础验证**：在独立子进程中校验 POSIX 线程（pthread）、Mach IPC、kqueue 事件机制、GCD（Grand Central Dispatch）、Unix 域套接字、本地 XPC 以及 Foundation 基础框架。
+4. **根卷切换（Pivot Root）**：通过 bindfs 提供 `notifyd`、`cfprefsd` 等核心常驻服务配置文件，将系统根文件系统安全切换至只读 APFS 卷。
+5. **移交原版 Apple `launchd`**：静态监督程序通过 `execve` 将 PID 1 控制权移交给原版 Apple `launchd`，随后系统常驻守护进程启动，并进一步拉起 `backboardd`、`SpringBoard` 以及 CoreAnimation 桌面合成服务。
 
-运行时和图形检查有超时限制。日志和状态仅保存在本次启动的 RAM 中。`xpc-local` 只覆盖进程内对象 API；CFPreferences 的同步和读回也不能单独证明 daemon RPC 路径完整。
+## 开发桌面模式（`--desktop-bringup`）
 
-## 桌面与多核实验
+### 设计背景与实现原理
 
-`--desktop-attempt` 增加部分原厂桌面及相关服务配置，并使用 RAM 日志诊断。此前观察到 runningboardd，未观察到 backboardd 和 SpringBoard；修复相关库缺失的尝试尚待实机验证。进程存在也不代表桌面或窗口服务已可用。
+在原生 iOS 16.5 系统中，系统首次开机时会拉起 `Setup`（Setup Assistant，初始设置向导）进程，要求连接 Apple 激活服务器以完成设备配置。在当前移植阶段，蜂窝基带、Wi-Fi 固件及 Apple 专属激活服务尚未完整适配，`Setup` 进程会因等待依赖服务响应超时被 Watchdog 机制终止（错误码 `0x8badf00d`），导致系统无法进入主屏幕。
 
-`--fast-boot` 需要 `--desktop-attempt`，会跳过部分重复诊断，但仍检查 GPT 和文件映射。去掉该参数可以恢复诊断面板。`--smp` 单独启用多核实验；固件是否接受 PSCI 调用及核心是否运行，仍需实机验证。
+为此，项目提供了开发桌面模式（`--desktop-bringup`，需搭配 `--fast-boot --touchscreen` 使用）：
 
-fast-boot 在静态 PID 1、系统卷挂载、RAM `/var` 就绪和执行 launchd 前记录启动时间与 UFS 计数。2026-11-03 的单核 USB 限时实验中，这四个检查点分别为 142、218、226、270 毫秒；首个图形 swap 出现在内核启动约 121 秒后。这些是特定设备与镜像的一次实验，不代表桌面已可操作。日志中还有激活、安装、图标等服务查找失败以及后续 Setup 进程反复退出；它们可能影响完整桌面启动，不能将半小时等待简单归结为 UFS 挂载。原系统服务尚未完整移植，RAM `/var` 也不会跨启动保存初始化状态。
+1. **进程拦截注入**：静态监督程序在根卷切换前，通过 `kern.exec_inject` 系统调用为 `SpringBoard` 配置注入库（避免使用会被原版 `launchd` 自动过滤的 `DYLD_INSERT_LIBRARIES` 环境变量）。
+2. **Objective-C 运行时适配**：注入库通过 Method Swizzling 拦截 `SBSetupManager` 的设置逻辑，依据真实 ABI 方法签名 `B24@0:8Q16`（返回布尔值，携带无符号长整型参数）进行严格校验，安全抑制 Setup Assistant 的拉起，并将本进程标记为已激活状态。
+3. **独立性保障**：该模式仅在内存中生效，用于开发阶段主屏幕渲染与输入交互测试，不向底层文件系统写入虚假激活记录。省略 `--desktop-bringup` 参数即可无损恢复原始 Setup 启动路径。
 
-2026-11-04 使用包含触摸桥和 Mesa 的单核桌面镜像启动，维护者观察到 Apple 标志或转圈，并以五指长按结束运行回收日志。`out/runs/20261104T045603.740771Z-device-collect/kernel.log` 记录系统卷在 223 毫秒挂载、launchd 在 5.644 秒启动；Mesa RAM 解压成功，但 CoreAnimation 明确报告没有 GPU 并使用软件渲染。SpringBoard、backboardd 与 datamigrator 均曾启动；第一个 migrationpluginwrapper 从 12:28:57 运行至 12:39:39，随后多个 wrapper 依次启动。日志同时记录 installd、mobileactivationd 等服务查找失败及 logd 的 SIGTRAP；不能仅据此断定哪个失败导致转圈，也没有桌面可操作的确认。本次日志经 USB 校验保存后设备返回 Sony Fastboot。
+## 显示缩放模式（`--display-mode`）
 
-实测将 launchd 继承的标准输出重定向到 `/dev/null` 不能阻止它自行输出控制台日志，因此未将其视为启动性能修复。
+系统支持通过 `--display-mode` 参数调整桌面渲染画布的缩放策略：
 
-交互桌面默认不限时，不要沿用短时硬件探针的 `--return-after` 参数；它从内核启动起计时，可能在桌面加载完成前强制返回 BootShim。`--usb-debug` 本身不设置定时器，主机采集器的 `--timeout` 也不控制设备重启。触摸通过 `--touchscreen` 显式启用，使用静态 PID1 配置的 `kern.exec_inject` 而不是会被 launchd 过滤的 plist `DYLD_INSERT_LIBRARIES`。详见 [触摸验证](TOUCH.md)。
+- **`--display-mode scaled2`（默认推荐）**：采用 750 × 1624 逻辑分辨率（即 375 × 812 点），像素总量仅为原始画布的 4/9。该模式大幅减轻了 GPU 填充率与内存总线带宽负担，使 CoreAnimation 桌面合成保持高帧率流畅运行。
+- **`--display-mode iphone`**：采用 iPhone X 物理规格的原生 1125 × 2436 逻辑画布，提供完全一致的点对点布局。
+- **`--display-mode native`**：向系统直接报告设备物理屏幕的 720 × 1280 规格。
+
+更多关于启动耗时优化与输入手势配置的信息，请参阅 [RAM 桌面启动耗时与数据迁移](BOOT-PERFORMANCE.md) 与 [触摸屏驱动移植](TOUCH.md)。

@@ -1,6 +1,6 @@
 # 第三方源码与许可
 
-四个主项目以固定提交的源码快照直接纳入本仓库。完整提交、上游地址、排除项、源码归属和共享链接由根目录 `upstream.lock.json` 记录。
+本项目将四个核心上游项目的源码快照以固定提交基线直接纳入仓库管理。相关的提交哈希、上游仓库地址、排除清单、源码归属及符号链接定义统一由根目录下的 [upstream.lock.json](../upstream.lock.json) 记录。
 
 | 项目 | 上游基线 | 当前源码 |
 | --- | --- | --- |
@@ -10,12 +10,21 @@
 | pe-parse | `31ac5966503689d5693cd9fb520bd525a8710e17` | `third_party/pe-parse/` |
 | Apple HFS | `31d5ec238dfab485e78a9a30b8b92d13e8914f03`，`hfs-627.100.6` | XNU 的 `bsd/hfs/`、`bsd/hfs_encodings/` |
 
-XNU 包含 HakiOS、HFS 和 lilac 适配，是所有内核实现的权威源码。HakiOS 上游 `xnu/files/` 和驱动目录中的实现维护在 `sources/xnu/` 对应位置；`sources/hakios/drivers/` 保留配置元数据，不维护另一份内核实现。
+## 源码整合与维护机制
 
-各项目的 LICENSE、NOTICE、第三方许可文件及源码版权声明保留在相应目录。libdeflate 的 MIT 许可位于 `sources/xnu/bsd/miscfs/apfs/libdeflate/COPYING`。HFS 保留源码声明并受 Apple Public Source License 约束。本项目没有统一顶层许可证。
+`sources/xnu/` 是内核构建的权威源码目录，整合了 Apple 原始 XNU、HakiOS、HFS 以及本项目对 MSM8998 与 Xperia XZ1 Compact 的适配补丁。`sources/hakios/` 仅保留构建辅助工具与驱动配置元数据，不重复维护内核实现代码。
 
-HakiOS 的预编译产物、嵌套 Git 元数据和 pe-parse 的可选 corkami 测试数据子模块不进入源码快照；依赖该数据集的上游测试默认关闭。上游完整 Git 历史不包含在本仓库中，版本追溯使用锁文件中的固定提交。
+各子目录完整保留了上游项目的 LICENSE、NOTICE、第三方许可文件及头部版权声明：
+- `sources/xnu/` 遵循 Apple Public Source License（APSL 2.0）。
+- APFS 模块中的 libdeflate 遵循 MIT 许可证（详见 `sources/xnu/bsd/miscfs/apfs/libdeflate/COPYING`）。
+- HFS 模块保留原始版权声明并受 APSL 约束。
+- `third_party/pe-parse/` 遵循 MIT 许可证。
+- 本项目整体未设置统一的顶层许可证，各模块分别受其对应开源许可证约束。
 
-额外内核依赖的六个 Git 项目继续固定到原提交，由 `./lilac deps fetch` 下载到 `out/cache/`。Mesa 固定到 25.0.7 的归档 SHA-256，适配补丁仅应用于 `out/` 内的构建树；其 Python 依赖版本和 wheel 哈希见 `configs/mesa-python.lock.json`。
+## 外部依赖与离线构建
 
-SDK、IPSW、固件和设备读回数据由使用者提供，留在 Git 之外。默认构建不下载这些材料，也不使用上游预编译内核。
+内核构建所需的额外依赖项（如 libdispatch、libpthread、AvailabilityVersions 等）在 `upstream.lock.json` 中锁定了具体的提交哈希，并在执行 `./lilac deps fetch` 时下载至本地 `out/cache/` 目录。
+
+Mesa 图形库固定至 25.0.7 归档版本，其构建补丁由工具链在编译期动态应用于 `out/` 工作目录，其 Python 依赖项与二进制 wheel 哈希记录于 `configs/mesa-python.lock.json`。
+
+所有专有系统材料（SDK、IPSW 镜像、Sony 固件二进制以及特定设备导出的物理映射数据）均由使用者自行准备，不随代码仓库分发。
