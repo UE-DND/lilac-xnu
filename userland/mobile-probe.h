@@ -2,6 +2,29 @@
  * One RAM boot: runtime batch, volatile /var, then real PID1 launchd and services.
  */
 #include "var-skeleton.h"
+#ifdef LILAC_RAM_MIGRATION_STATE
+#include "ram-migration-state.h"
+/* Explicit experiment on the freshly mounted RAM volume, before cfprefsd starts.
+ * This restores the upstream RAM boot preference; it does not migrate user data.
+ */
+static int mobile_ram_migration_state(void) {
+    const char *path="/ios/private/var/mobile/Library/Preferences/com.apple.migration.plist";
+    int fd=open(path,O_WRONLY|O_CREAT|O_EXCL,0644);
+    if(fd<0)return 0;
+    size_t done=0;
+    while(done<sizeof(ram_migration_plist)) {
+        ssize_t n=write(fd,ram_migration_plist+done,sizeof(ram_migration_plist)-done);
+        if(n<0 && errno==4)continue;
+        if(n<=0){close(fd);unlink(path);return 0;}
+        done+=(size_t)n;
+    }
+    int ok=close(fd)==0;
+    if(ok)ok=chmod(path,0644)==0 && chown(path,501,501)==0;
+    if(!ok){unlink(path);return 0;}
+    puts("RAM MIGRATION STATE: upstream preference seeded; stock migration bypass experiment, no user data migrated");
+    return 1;
+}
+#endif
 #ifdef LILAC_TOUCHSCREEN
 #include "touch-bridge.h"
 #endif
@@ -32,6 +55,9 @@ static int mobile_var(void) {
     }
     const char *extra[]={"/ios/private/var/log/com.apple.xpc.launchd","/ios/private/var/db/com.apple.xpc.launchd","/ios/private/var/db/launchd.db"};
     for(unsigned i=0;i<sizeof(extra)/sizeof(extra[0]);i++)if(mkdir(extra[i],0755)&&errno!=17)return 0;
+#ifdef LILAC_RAM_MIGRATION_STATE
+    if(!mobile_ram_migration_state()){printf("MOBILE RAM migration state FAIL errno=%d\n",errno);return 0;}
+#endif
     printf("MOBILE writable /var: PASS; %u original template directories, RAM only\n",made);return 1;
 }
 /* Reap even a killed child; never leave a loading experiment unbounded. */
@@ -206,7 +232,7 @@ static void mobile_test(int baseline_ok) {
     puts("UFS SYSTEM ROOT: PASS; /private/var=RAM; /dev preserved");
     chmod("/dev/console",0666);
 #ifdef LILAC_TOUCHSCREEN
-    if(!lilac_touch_bridge_configure()) {
+    if(!lilac_touch_bridge_configure(LILAC_DESKTOP_BRINGUP)) {
         puts("lilac input: kernel exec injection failed; retaining static PID1");return;
     }
 #endif

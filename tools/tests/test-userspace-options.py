@@ -25,11 +25,21 @@ class UserspaceOptionsTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.reject(['--return-after', value], '--return-after must be between 0 and 3600')
 
-    def test_debug_refuses_smp(self):
-        self.reject(['--usb-debug', '--smp'], '--usb-debug requires single-core boot')
+    def test_debug_smp_reaches_other_option_validation(self):
+        self.reject(['--usb-debug', '--smp', '--touchscreen'], '--touchscreen requires --desktop-attempt')
 
     def test_touch_requires_desktop(self):
         self.reject(['--touchscreen'], '--touchscreen requires --desktop-attempt')
+
+    def test_buttons_require_hid_bridge(self):
+        self.reject(['--buttons'], '--buttons requires --touchscreen')
+
+    def test_desktop_bringup_requires_interactive_input(self):
+        for options in ([], ['--fast-boot'], ['--touchscreen']):
+            self.reject(['--desktop-bringup', *options], '--desktop-bringup requires --fast-boot --touchscreen')
+
+    def test_ram_migration_state_requires_desktop(self):
+        self.reject(['--ram-migration-state'], '--ram-migration-state requires --desktop-attempt')
 
     def test_gpu_mesa_requires_desktop_firmware_and_touch(self):
         self.reject(['--gpu-mesa-dir', '/unused'],
