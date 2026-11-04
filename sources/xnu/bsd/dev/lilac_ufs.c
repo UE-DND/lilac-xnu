@@ -1104,7 +1104,8 @@ lilac_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst,
 }
 
 /*
- * Called from loader_return() after psci_smp_stop_others() on the boot CPU.
+ * Called from loader_return() after psci_smp_quiesce_others() on the boot CPU;
+ * other CPUs are parked until device cleanup completes, then powered off.
  * Must not acquire mutexes or allocate memory.
  */
 void

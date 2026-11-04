@@ -16,7 +16,9 @@
 #include "debug-usb.h"
 #endif
 #ifdef LILAC_SMP
-#include "smp-topology.h"
+#include "smp-return.h"
+static uint32_t lent_mpidrs[LILAC_SMP_MAX_CPUS];
+static unsigned lent_count;
 static int64_t shim_affinity(uint32_t mpidr, void *context) {
     (void)context;
     register uint64_t x0 __asm__("x0")=0xc4000004u;
@@ -616,9 +618,58 @@ void lilac_debug_diagnostics(uint32_t stage, uint32_t address, uint32_t value,
 }
 #endif
 
+#ifdef LILAC_SMP
+static int shim_check_smp_return(uint64_t reason, uint64_t esr, uint64_t elr,
+                                 uint64_t far, uint64_t lr, uint64_t sp) {
+    /* No topology has been published yet on an early BootShim exception. */
+    if (lent_count == 0) return 1;
+    uint64_t current;
+    int64_t states[LILAC_SMP_MAX_CPUS] = {0};
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(current));
+    enum lilac_smp_return_result result = lilac_smp_check_return(
+        lent_mpidrs, lent_count, (uint32_t)current, shim_affinity, NULL, states);
+    if (result == LILAC_SMP_RETURN_OK) return 1;
+
+    /* Preserve the XNU panel below y=560. No USB or DMA is started here. */
+    fill_rect(0, 0, FB_WIDTH, 550, 16, 20, 28);
+    draw_string_small(24, 16, "SMP return refused - USB remains off", 255, 90, 90);
+    const char *detail = result == LILAC_SMP_RETURN_BAD_TOPOLOGY ? "Invalid saved CPU topology" :
+        result == LILAC_SMP_RETURN_WRONG_CPU ? "Return is not on the boot CPU" :
+        "Firmware did not confirm every borrowed CPU OFF";
+    draw_string_small(24, 40, detail, 255, 190, 120);
+    draw_hex_small(24, 68, "Reason: ", reason, 255, 220, 100);
+    draw_hex_small(360, 68, "Count: ", lent_count, 255, 220, 100);
+    draw_hex_small(24, 92, "Current: ", current, 160, 210, 255);
+    draw_hex_small(360, 92, "Boot: ", lent_mpidrs[0], 160, 210, 255);
+    draw_string_small(24, 120, "PSCI: 0=ON  1=OFF  2=PENDING  others=error", 240, 240, 245);
+    if (result != LILAC_SMP_RETURN_BAD_TOPOLOGY) {
+        for (unsigned i = 1; i < lent_count; i++) {
+            int y = 146 + (int)(i - 1) * 24;
+            draw_hex_small(24, y, "MPIDR: ", lent_mpidrs[i], 160, 210, 255);
+            draw_hex_small(360, y, "State: ", (uint64_t)states[i],
+                           255, states[i] == 1 ? 220 : 90, 100);
+        }
+    }
+    if (reason == 1 || reason == 0xdead) {
+        draw_hex_small(24, 334, "ESR: ", esr, 255, 190, 120);
+        draw_hex_small(360, 334, "ELR: ", elr, 255, 190, 120);
+        draw_hex_small(24, 358, "FAR: ", far, 255, 190, 120);
+        draw_hex_small(360, 358, "LR: ", lr, 255, 190, 120);
+        draw_hex_small(24, 382, "SP: ", sp, 255, 190, 120);
+    }
+    __asm__ volatile ("dsb sy" ::: "memory");
+    return 0;
+}
+#endif
+
 void shim_on_kernel_return(uint64_t log_pa, uint64_t log_len, uint64_t reason,
                            uint64_t esr, uint64_t elr, uint64_t far, uint64_t lr, uint64_t sp) {
     (void)sp;
+#ifdef LILAC_SMP
+    /* Independent final guard: USB/DMA can reuse RAM only after every core
+     * lent to XNU has actually powered off, including early-return paths. */
+    if (!shim_check_smp_return(reason, esr, elr, far, lr, sp)) return;
+#endif
 #ifdef LILAC_UFS_HANDOFF
     if (reason == 0xdead) {
         fill_rect(0,1000,FB_WIDTH,FB_HEIGHT,16,20,28);
@@ -917,6 +968,12 @@ void shim_main(const uint8_t *payload_ptr, uint64_t dtb_ptr, uint64_t initial_el
 
     dt_begin(&w, "product");
     dt_prop_str(&w, "product-name", "iPhone X");
+    /* iPhone X product properties from the 20F66 D22AP device tree.
+     * Without these, MobileGestalt can select a generic phone UI. */
+    dt_prop_u32(&w, "thin-bezel", 1);
+    dt_prop_u32(&w, "artwork-device-subtype", 0x984);
+    dt_prop_u32(&w, "artwork-scale-factor", 3);
+    dt_prop_str(&w, "artwork-device-idiom", "phone");
     dt_end(&w);
 
     dt_begin(&w, "options");
@@ -932,6 +989,8 @@ void shim_main(const uint8_t *payload_ptr, uint64_t dtb_ptr, uint64_t initial_el
 #ifdef LILAC_SMP
     uint32_t cpu_mpidrs[LILAC_SMP_MAX_CPUS];
     unsigned cpu_count=lilac_smp_topology((uint32_t)mpidr,shim_affinity,NULL,cpu_mpidrs);
+    for(unsigned i=0;i<cpu_count;i++) lent_mpidrs[i]=cpu_mpidrs[i];
+    lent_count=cpu_count;
 #else
     uint32_t cpu_mpidrs[1]={(uint32_t)(mpidr&0xffffu)};
     unsigned cpu_count=1;

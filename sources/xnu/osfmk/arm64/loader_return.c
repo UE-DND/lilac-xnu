@@ -44,6 +44,7 @@ extern void gic_v3_irq_cpu_shutdown(void);
 
 void loader_log_putc(char c);
 void loader_return(void);
+void loader_smp_stop_refused(int cpu, uint32_t phys_id, int64_t state, bool parking);
 extern void hakios_adreno_quiesce(void);
 extern void hakios_adreno_stop(void);
 extern void hakios_adreno_minute(void);
@@ -400,11 +401,10 @@ loader_return(void)
 {
 #if defined(GENERIC_PSCI_SMP)
 	/*
-	 * With more than one processor: the others switch themselves off first, and the rest of
-	 * this is done by the boot processor, the one the loader gave us. This call comes back
-	 * on that processor only (on another one it has it call loader_return() in its turn).
+	 * Freeze other processors before touching device state, on the original boot CPU.
+	 * Keep them parked until every device/firmware callback is done; only then CPU_OFF.
 	 */
-	psci_smp_stop_others();
+	psci_smp_quiesce_others();
 #endif
 	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -416,6 +416,9 @@ loader_return(void)
 	hakios_torch_quiesce();        /* the flashlight off, if it was lit */
 	hakios_camera_quiesce();       /* the camera powered down, if it was powered up */
 	hakios_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
+#if defined(GENERIC_PSCI_SMP)
+	psci_smp_stop_others();        /* final OFF check: no device callbacks may follow */
+#endif
 	/*
 	 * A panic's text is first collected in the panic buffer and only later
 	 * flushed to the console; if the console itself is what failed, that
@@ -425,6 +428,9 @@ loader_return(void)
 	if (!loader_return_entered) {
 		loader_log_append_msgbuf();
 	}
+#if defined(GENERIC_PSCI_SMP)
+	psci_smp_log_return_state();
+#endif
 	if (!loader_return_entered) {
 		loader_log_append_panic_text();
 	}
@@ -558,6 +564,29 @@ lilac_fb_hex(volatile uint8_t *fb, int x, int y, const char *label, uint64_t val
 	}
 }
 
+/* Display only: a CPU may still be running, so leave the log ring intact and
+ * show the failure independently of its wrap position. No loader/USB jump. */
+void
+loader_smp_stop_refused(int cpu, uint32_t phys_id, int64_t state, bool parking)
+{
+	lilac_fb_dump_panel(">>> XNU SMP STOP REFUSED <<<", 0, 0, 0, 0, false);
+	uint64_t ttbr0, tcr, daif;
+	volatile uint8_t *fb = lilac_fb_begin(&ttbr0, &tcr, &daif);
+	if (fb == NULL) return;
+	for (int y = 0; y < 200; y++) {
+		for (int x = 0; x < LILAC_FB_WIDTH; x++) {
+			lilac_fb_px(fb, x, y, 16, 20, 28);
+		}
+	}
+	lilac_fb_str(fb, 24, 16, parking ? "XNU: CPU did not park; return refused" :
+	    "XNU: CPU not confirmed OFF; return refused", 1, 255, 90, 90);
+	lilac_fb_hex(fb, 24, 44, "CPU: ", (uint32_t)cpu, 255, 220, 100);
+	lilac_fb_hex(fb, 360, 44, "MPIDR: ", phys_id, 255, 220, 100);
+	lilac_fb_hex(fb, 24, 72, "PSCI: ", (uint64_t)state, 255, 190, 120);
+	lilac_fb_str(fb, 24, 100, "PSCI: 0=ON  1=OFF  2=PENDING  others=error", 1, 240, 240, 245);
+	lilac_fb_end(ttbr0, tcr, daif);
+}
+
 static void
 lilac_fb_dump_panel(const char *title, uint64_t esr, uint64_t elr, uint64_t far, uint64_t lr, bool has_regs)
 {
@@ -600,6 +629,12 @@ lilac_fb_dump_panel(const char *title, uint64_t esr, uint64_t elr, uint64_t far,
 			if (loader_log[start] == '\n') lines++;
 		}
 		if (start > 0 && loader_log[start] == '\n') start++;
+		/* The complete SMP snapshot has priority over wrapped, long GPU lines.
+		 * Keep subsequent panic text as well; the full log is retained for USB. */
+		static const char marker[] = "\n--- SMP return snapshot ---\n";
+		for (uint32_t i = start; i + sizeof(marker) - 1 <= len; i++) {
+			if (memcmp(loader_log + i, marker, sizeof(marker) - 1) == 0) start = i + 1;
+		}
 		int x = 24;
 		for (uint32_t i = start; i < len && y <= 1246; i++) {
 			char c = loader_log[i];

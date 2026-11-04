@@ -212,8 +212,8 @@ def main():
     if a.ramdisk_format == 'apfs' and a.ramdisk is None:
         p.error('--ramdisk-format apfs requires --ramdisk')
     a.usb_debug = a.usb_debug or a.usb_self_test
-    if a.usb_debug and (a.smp or a.ufs_snapshot or a.ufs_read_probe or a.ufs_handoff_snapshot):
-        p.error('USB debug currently requires single-core, non-UFS-diagnostic RAM boot')
+    if a.usb_debug and (a.ufs_snapshot or a.ufs_read_probe or a.ufs_handoff_snapshot):
+        p.error('USB debug requires non-UFS-diagnostic RAM boot')
     kernel, dtb = a.kernel.read_bytes(), a.dtb.read_bytes()
     km = macho(kernel, True)
     if len(dtb) < 40 or struct.unpack_from('>I', dtb)[0] != 0xD00DFEED:
@@ -262,9 +262,9 @@ def main():
     usb_debug = None
     if a.usb_debug:
         debug_sources = [ROOT / 'bootloader' / name for name in
-                         ('debug-usb.c', 'debug-usb.h', 'debug-protocol.h', 'debug-reboot.h', 'shim-entry.S', 'shim-main.c')]
+                         ('debug-usb.c', 'debug-usb.h', 'debug-protocol.h', 'debug-reboot.h', 'shim-entry.S', 'shim-main.c', 'smp-topology.h', 'smp-return.h')]
         run_id = hashlib.sha256(kernel + ramdisk + dtb + a.extra_boot_args.encode() +
-                                bytes([a.usb_self_test]) + b''.join(path.read_bytes() for path in debug_sources)).hexdigest()[:32]
+                                bytes([a.usb_self_test, a.smp]) + b''.join(path.read_bytes() for path in debug_sources)).hexdigest()[:32]
         flags += ['-DLILAC_USB_DEBUG=1', '-DLILAC_DEBUG_RUN_ID=' + json.dumps(run_id)]
         if a.usb_self_test:
             flags.append('-DLILAC_USB_SELF_TEST=1')
@@ -329,7 +329,7 @@ def main():
               *hello_inputs,
               *[ROOT / 'bootloader' / n for n in ('shim-main.c', 'shim-entry.S', 'shim.ld', 'boot_args.h', 'font_8x16.c', 'font_8x16.h')]]
     if a.smp:
-        inputs.append(ROOT/'bootloader/smp-topology.h')
+        inputs.extend(ROOT / 'bootloader' / n for n in ('smp-topology.h', 'smp-return.h'))
     if a.usb_debug:
         inputs.extend(debug_sources)
         inputs.append(HAKIOS / 'tools/soc-args.py')

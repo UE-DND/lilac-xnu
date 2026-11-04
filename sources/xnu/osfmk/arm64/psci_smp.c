@@ -26,8 +26,9 @@
  *
  * The other half is the way out. The kernel ends by returning to the boot
  * loader (loader_return.c), and the loader gets back only what it started:
- * one core, the boot processor's. psci_smp_stop_others() makes every other
- * core switch itself off first, wherever it is.
+ * one core, the boot processor's. First freeze other cores so device cleanup
+ * cannot race their work; power them off only after the last device/firmware
+ * operation. No device callback follows the final OFF confirmation.
  */
 #include <mach/mach_types.h>
 #include <kern/clock.h>
@@ -60,6 +61,7 @@
 
 extern void loader_return(void);
 extern void loader_log_putc(char c);
+extern void loader_smp_stop_refused(int cpu, uint32_t phys_id, int64_t state, bool parking);
 extern unsigned long gVirtBase, gPhysBase;
 
 /* The firmware is called with HVC, not SMC. (start.s reads this too, at its physical address.) */
@@ -78,10 +80,20 @@ _Static_assert(sizeof(struct psci_smp_start_fault) == 64, "one cache line");
 static uint32_t psci_smp_cpu_stage[MAX_CPUS];   /* PSCI_SMP_CPU_*, by cpu number */
 static uint32_t psci_smp_started;               /* a bit per core that CPU_ON was granted for */
 
+/* Kept until the final log panel, after the message buffer has been appended.
+ * Otherwise recent GPU output hides the stop results on the physical screen. */
+static uint32_t psci_smp_return_checked;
+static uint32_t psci_smp_return_phys[MAX_CPUS];
+static int64_t  psci_smp_return_state[MAX_CPUS];
+static uint64_t psci_smp_return_mpidr;
+
 static int      psci_smp_stop_owner = -1;       /* the processor that began the return to the boot loader */
 static bool     psci_smp_boot_wanted;           /* it was not the boot processor: that one is to finish */
 static bool     psci_smp_boot_busy;             /* ... and has begun to */
-static bool     psci_smp_stopping;              /* every other core switches itself off */
+static bool     psci_smp_stopping;              /* every other core parks */
+static bool     psci_smp_park_complete;         /* boot CPU may now quiesce devices */
+static bool     psci_smp_poweroff;              /* device cleanup done: parked cores switch off */
+static void     psci_smp_park_self(void) __dead2;
 
 static int64_t
 psci_call(uint64_t function, uint64_t arg1, uint64_t arg2, uint64_t arg3)
@@ -93,10 +105,10 @@ psci_call(uint64_t function, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 
 	if (psci_smp_hvc) {
 		__asm__ volatile ("hvc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
-                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17");
+                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 	} else {
 		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
-                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17");
+                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 	}
 	return (int64_t)x0;
 }
@@ -138,6 +150,10 @@ void
 psci_smp_cpu_running(void)
 {
 	psci_smp_cpu_reached(PSCI_SMP_CPU_RUNNING);
+	/* A CPU_ON already in flight when shutdown began must not join user work. */
+	if (cpu_number() != master_cpu && os_atomic_load(&psci_smp_stopping, acquire)) {
+		psci_smp_park_self();
+	}
 }
 
 static void
@@ -159,6 +175,9 @@ psci_smp_clean_segment(const char *name)
 kern_return_t
 psci_smp_start_cpu(int cpu)
 {
+	if (os_atomic_load(&psci_smp_stopping, acquire)) {
+		return KERN_FAILURE;
+	}
 	cpu_data_t *cdp = cpu_datap(cpu);
 	uint32_t phys_id = cdp->cpu_phys_id, stage;
 	uint64_t entry = ml_static_vtop((vm_offset_t)&LowResetVectorBase);
@@ -214,10 +233,11 @@ psci_smp_start_cpu(int cpu)
 		struct psci_smp_start_fault *f = &psci_smp_start_fault;
 		uint64_t to_virtual = gVirtBase - gPhysBase;
 
-		printf("psci: cpu %d (MPIDR 0x%llx) took an exception on its way in and has switched itself off: "
+		printf("psci: cpu %d (MPIDR 0x%llx) took an exception on its way in and attempted CPU_OFF: "
 		    "ESR 0x%llx ELR 0x%llx FAR 0x%llx LR 0x%llx SP 0x%llx (ELR and LR as kernel addresses: 0x%llx 0x%llx)\n",
 		    cpu, f->mpidr, f->esr, f->elr, f->far, f->lr, f->sp, f->elr + to_virtual, f->lr + to_virtual);
-		os_atomic_andnot(&psci_smp_started, 1u << cpu, relaxed);        /* nothing of it is left to stop */
+		/* The exception note is written BEFORE CPU_OFF, which can fail. Keep
+		 * ownership: return must still obtain firmware's OFF confirmation. */
 	} else {
 		printf("psci: cpu %d (MPIDR 0x%x) was started %d seconds ago and has not joined: %s\n",
 		    cpu, phys_id, PSCI_SMP_START_SECONDS,
@@ -247,6 +267,21 @@ psci_smp_cpu_off(void)
 }
 
 static void
+psci_smp_park_self(void)
+{
+	__builtin_arm_wsr("DAIFSet", DAIFSC_ALL);
+	__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
+	/* Drain the interrupted CPU's memory/MMIO before acknowledging the park. */
+	__builtin_arm_dsb(DSB_SY);
+	os_atomic_store(&psci_smp_cpu_stage[cpu_number()], PSCI_SMP_CPU_PARKED, release);
+	__builtin_arm_dsb(DSB_SY);
+	while (!os_atomic_load(&psci_smp_poweroff, acquire)) {
+		__builtin_arm_wfe();
+	}
+	psci_smp_cpu_off();
+}
+
+static void
 psci_smp_note(const char *what, int cpu)
 {
 	static const char prefix[] = "\npsci: cpu ";
@@ -260,7 +295,42 @@ psci_smp_note(const char *what, int cpu)
 	}
 }
 
-/* Tell every core but this one to switch itself off (psci_smp_stop_here() is where they hear it). */
+static void
+psci_smp_hex(uint64_t value)
+{
+	static const char digits[] = "0123456789abcdef";
+	loader_log_putc('0');
+	loader_log_putc('x');
+	for (int shift = 60; shift >= 0; shift -= 4) {
+		loader_log_putc(digits[(value >> shift) & 15]);
+	}
+}
+
+void
+psci_smp_log_return_state(void)
+{
+	if (psci_smp_return_checked == 0) {
+		return;
+	}
+	for (const char *p = "\n--- SMP return snapshot ---\nboot MPIDR="; *p; p++) loader_log_putc(*p);
+	psci_smp_hex(psci_smp_return_mpidr);
+	loader_log_putc('\n');
+	for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+		if (!(psci_smp_return_checked & (1u << cpu))) {
+			continue;
+		}
+		/* One compact line per CPU, no blank rows: all seven fit on screen. */
+		for (const char *p = "cpu "; *p; p++) loader_log_putc(*p);
+		loader_log_putc((char)('0' + cpu));
+		for (const char *p = " MPIDR="; *p; p++) loader_log_putc(*p);
+		psci_smp_hex(psci_smp_return_phys[cpu]);
+		for (const char *p = " PSCI="; *p; p++) loader_log_putc(*p);
+		psci_smp_hex((uint64_t)psci_smp_return_state[cpu]);
+		loader_log_putc('\n');
+	}
+}
+
+/* Tell every core but this one to park (psci_smp_stop_here() is where they hear it). */
 static void
 psci_smp_stop_rest(void)
 {
@@ -281,12 +351,12 @@ psci_smp_stop_rest(void)
 
 /*
  * The system is going back to the boot loader (loader_return()). Returns on the boot processor
- * only, once the other cores are off -- or have been given up on. On any other processor it
+ * only, once every other core is parked or firmware confirms it was already off. On any other processor it
  * does not return: that one hands the job to the boot processor, which the loader's side of
- * the return belongs to, and switches itself off like the rest.
+ * the return belongs to, and parks like the rest. Device cleanup may begin only after this.
  */
 void
-psci_smp_stop_others(void)
+psci_smp_quiesce_others(void)
 {
 	int me, max_cpu;
 	uint64_t now, deadline;
@@ -298,7 +368,7 @@ psci_smp_stop_others(void)
 	me = cpu_number();
 	max_cpu = ml_get_max_cpu_number();
 	if (!os_atomic_cmpxchg(&psci_smp_stop_owner, -1, me, acq_rel) && psci_smp_stop_owner != me && me != master_cpu) {
-		psci_smp_cpu_off();     /* another processor is at it already */
+		psci_smp_park_self();   /* another processor is at it already */
 	}
 
 	if (me != master_cpu) {
@@ -326,8 +396,11 @@ psci_smp_stop_others(void)
 			 */
 			psci_smp_note(" cannot return to the boot loader and the boot processor does not answer: all cores stop here\n", me);
 			psci_smp_stop_rest();
+			os_atomic_store(&psci_smp_poweroff, true, release);
+			__builtin_arm_dsb(DSB_SY);
+			__builtin_arm_sev();
 		}
-		psci_smp_cpu_off();
+		psci_smp_park_self();
 	}
 
 	psci_smp_stop_rest();
@@ -335,26 +408,70 @@ psci_smp_stop_others(void)
 	nanoseconds_to_absolutetime(PSCI_SMP_STOP_SECONDS * NSEC_PER_SEC, &deadline);
 	deadline += now;
 	for (int cpu = 0; cpu <= max_cpu; cpu++) {
-		cpu_data_t *cdp = cpu_datap(cpu);
+		if (cpu == me) continue;
+		uint32_t phys_id = ml_get_topology_info()->cpus[cpu].phys_id;
+		bool parked = false;
+		int64_t state = 0;
+		do {
+			parked = os_atomic_load(&psci_smp_cpu_stage[cpu], acquire) == PSCI_SMP_CPU_PARKED;
+			if (parked) break;
+			state = psci_call(PSCI_AFFINITY_INFO, phys_id, 0, 0);
+			if (state == PSCI_AFFINITY_OFF) break;
+			now = mach_absolute_time();
+		} while (now < deadline);
+		if (!parked && state != PSCI_AFFINITY_OFF) {
+			psci_smp_note(" did not park: device cleanup and loader return refused\n", cpu);
+			loader_smp_stop_refused(cpu, phys_id, state, true);
+			for (;;) { __builtin_arm_wfi(); }
+		}
+	}
+	psci_smp_park_complete = true;
+	psci_smp_note(" all secondary CPUs parked/off; device cleanup may begin\n", me);
+}
 
-		if (cpu == me || cdp == NULL || !(psci_smp_started & (1u << cpu))) {
+/* Called after all device callbacks. Release the parked CPUs to CPU_OFF,
+ * then query the complete topology. Nothing resumes normal kernel work. */
+void
+psci_smp_stop_others(void)
+{
+	if (psci_smp_started == 0) return;
+	int me = cpu_number(), max_cpu = ml_get_max_cpu_number();
+	uint64_t now, deadline;
+	if (me != master_cpu || !psci_smp_park_complete) {
+		loader_smp_stop_refused(me, cpu_datap(me)->cpu_phys_id, -1, true);
+		for (;;) { __builtin_arm_wfi(); }
+	}
+	os_atomic_store(&psci_smp_poweroff, true, release);
+	__builtin_arm_dsb(DSB_SY);
+	__builtin_arm_sev();
+	psci_smp_return_mpidr = __builtin_arm_rsr64("MPIDR_EL1");
+	now = mach_absolute_time();
+	nanoseconds_to_absolutetime(PSCI_SMP_STOP_SECONDS * NSEC_PER_SEC, &deadline);
+	deadline += now;
+	for (int cpu = 0; cpu <= max_cpu; cpu++) {
+		if (cpu == me) {
 			continue;
 		}
+		/* The immutable topology includes CPUs that did not finish startup.
+		 * Neither a missing cpu_data nor a startup-stage bit proves OFF. */
+		uint32_t phys_id = ml_get_topology_info()->cpus[cpu].phys_id;
 		while (now < deadline) {
-			if (os_atomic_load(&psci_smp_cpu_stage[cpu], acquire) == PSCI_SMP_CPU_OFF) {
-				/* it has said it is going; the firmware knows when it has gone (if it can tell at all) */
-				int64_t state = psci_call(PSCI_AFFINITY_INFO, cdp->cpu_phys_id, 0, 0);
-
-				if (state == PSCI_AFFINITY_OFF || state < 0) {
-					break;
-				}
+			if (psci_call(PSCI_AFFINITY_INFO, phys_id, 0, 0) == PSCI_AFFINITY_OFF) {
+				break;
 			}
 			now = mach_absolute_time();
 		}
-		if (os_atomic_load(&psci_smp_cpu_stage[cpu], acquire) != PSCI_SMP_CPU_OFF &&
-		    psci_call(PSCI_AFFINITY_INFO, cdp->cpu_phys_id, 0, 0) != PSCI_AFFINITY_OFF) {
-			psci_smp_note(" did not stop: it is left running\n", cpu);
+		int64_t state = psci_call(PSCI_AFFINITY_INFO, phys_id, 0, 0);
+		psci_smp_return_phys[cpu] = phys_id;
+		psci_smp_return_state[cpu] = state;
+		psci_smp_return_checked |= 1u << cpu;
+		if (state != PSCI_AFFINITY_OFF) {
+			psci_smp_note(" is not confirmed OFF: refusing to reuse kernel memory or return to USB\n", cpu);
+			psci_smp_log_return_state();
+			loader_smp_stop_refused(cpu, phys_id, state, false);
+			for (;;) { __builtin_arm_wfi(); }
 		}
+		psci_smp_note(" firmware confirmed OFF\n", cpu);
 	}
 }
 
@@ -371,13 +488,13 @@ psci_smp_stop_here(void)
 	}
 	if (cpu_number() != master_cpu) {
 		if (os_atomic_load(&psci_smp_stopping, acquire)) {
-			psci_smp_cpu_off();
+			psci_smp_park_self();
 		}
 		return;
 	}
 	if (os_atomic_load(&psci_smp_boot_wanted, acquire) && !psci_smp_boot_busy) {
 		psci_smp_boot_busy = true;
-		loader_return();        /* stops the rest (psci_smp_stop_others()); back only if no loader listens */
+		loader_return();        /* parks the rest, quiesces devices, then powers the rest off */
 		for (;;) {
 			__builtin_arm_wfi();
 		}
